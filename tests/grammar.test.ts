@@ -9,6 +9,7 @@ import { ASK_MEMORY, askInput, historyText, importWindow, keepable, kindOf, merg
 import type { Period } from '../hooks/history'
 import type { Entry, History, Kind } from '../hooks/history'
 import { batches, typedText } from '../tools/transcript'
+import { chatAnswer, chatUrl, hostOf } from '../hooks/endpoint'
 
 const FIXES = {
   english: true,
@@ -739,6 +740,9 @@ test('config helpers: settings, lists, words and cuts', () => {
     clean: true,
     askMemory: true,
     cowork: true,
+    endpoint: '',
+    endpointModel: '',
+    endpointKey: '',
   })
   expect(settingsFrom({ cowork: false }).cowork).toBe(false)
   expect(settingsFrom({ effort: 'max', max_chars: 5, dialect: 'au' })).toMatchObject({ effort: 'low', maxChars: 200, dialect: 'any', desktop: 'band' })
@@ -1388,4 +1392,87 @@ test('ask helpers: a period only in its compact forms, and the prompt in order',
   expect(p.indexOf('Their kept fixes')).toBeLessThan(p.indexOf('latest prompts'))
   expect(p).toContain('teh → (drop it)')
   expect(p.indexOf('Q: q1\nA: a1')).toBeLessThan(p.indexOf('Their question: why?'))
+})
+
+/** The endpoint beneath the plugin: answers `content`, or the `refuse` errors in turn; records each request. */
+const endpointServer = (on: On, content: unknown, refuse: { status: number; error: string }[] = []) => {
+  const calls: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
+  on('http.fetch', ($, e) => {
+    const { url, init } = e as unknown as { url: string; init?: { body?: string; headers?: Record<string, string> } }
+    calls.push({ url, headers: init?.headers ?? {}, body: JSON.parse(init?.body ?? '{}') as Record<string, unknown> })
+    const no = refuse[calls.length - 1]
+    const text =
+      no === undefined
+        ? JSON.stringify({ choices: [{ message: { content: typeof content === 'string' ? content : JSON.stringify(content) } }] })
+        : JSON.stringify({ error: { message: no.error } })
+    return { value: { status: no?.status ?? 200, ok: no === undefined, headers: {}, text } } as never
+  })
+  return calls
+}
+
+const LOCAL = { endpoint: 'http://localhost:9931', endpoint_model: 'gemma-4-26b-a4b-qat' }
+
+test('with an endpoint set, the check goes there, not to Claude, thinking off and no key', { options: LOCAL }, async ($, on) => {
+  const clock = mock.clock(on)
+  const asked = haiku(on, { english: true, fixes: [] })
+  const calls = endpointServer(on, { ...FIXES, natural: null })
+  await $.prompt.submit({ text: TYPO } as never)
+  await clock.advance(5)
+  expect(asked.prompts).toEqual([])
+  expect(calls.length).toBe(1)
+  expect(calls[0]?.url).toBe('http://localhost:9931/v1/chat/completions')
+  expect(calls[0]?.headers.authorization).toBeUndefined()
+  expect(calls[0]?.body).toMatchObject({ model: 'gemma-4-26b-a4b-qat', max_tokens: 4096, temperature: 0, chat_template_kwargs: { enable_thinking: false } })
+  expect((calls[0]?.body.messages as { role: string; content: string }[])[1]?.content).toBe(TYPO)
+  const row = await mountRow($, TYPO)
+  expect(await row.find({ key: 'grammar' })).toBeDefined()
+})
+
+const REMOTE = { endpoint: 'https://api.example.com/v1', endpoint_model: 'gpt-x', endpoint_key: 'sk-secret' }
+
+test('a remote endpoint gets the key, and what it refuses is dropped and remembered', { options: REMOTE }, async ($, on) => {
+  const clock = mock.clock(on)
+  haiku(on, { english: true, fixes: [] })
+  const calls = endpointServer(on, { ...FIXES, natural: null }, [
+    { status: 400, error: 'Unrecognized request argument supplied: chat_template_kwargs' },
+    { status: 400, error: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead." },
+    { status: 400, error: "Unsupported value: 'temperature' does not support 0 with this model." },
+  ])
+  await $.prompt.submit({ text: TYPO } as never)
+  await clock.advance(5)
+  expect(calls.length).toBe(4)
+  expect(calls[0]?.url).toBe('https://api.example.com/v1/chat/completions')
+  expect(calls[0]?.headers.authorization).toBe('Bearer sk-secret')
+  const last = calls[3]?.body ?? {}
+  expect(last.max_completion_tokens).toBe(4096)
+  expect('max_tokens' in last || 'temperature' in last || 'chat_template_kwargs' in last).toBe(false)
+  expect(await (await mountRow($, TYPO)).find({ key: 'gr-fixes' })).toBeDefined()
+  // The next prompt goes out in the form that worked.
+  await $.prompt.submit({ text: 'it should appea right about here' } as never)
+  await clock.advance(5)
+  expect(calls.length).toBe(5)
+})
+
+test('an endpoint error shows as a failed check, without the key', { options: REMOTE }, async ($, on) => {
+  const clock = mock.clock(on)
+  haiku(on, { english: true, fixes: [] })
+  endpointServer(on, '', [{ status: 401, error: 'Incorrect API key provided: sk-secret' }])
+  await $.prompt.submit({ text: TYPO } as never)
+  await clock.advance(5)
+  const row = await mountRow($, TYPO)
+  const err = await row.find({ key: 'gr-error' })
+  expect(err).toBeDefined()
+  expect(JSON.stringify(err)).toContain('HTTP 401')
+  expect(JSON.stringify(err)).not.toContain('sk-secret')
+})
+
+test('endpoint helpers: the URL, the host and the answer', () => {
+  expect(chatUrl('http://localhost:9931/')).toBe('http://localhost:9931/v1/chat/completions')
+  expect(chatUrl('http://localhost:9931/v1')).toBe('http://localhost:9931/v1/chat/completions')
+  expect(chatUrl('https://openrouter.ai/api/v1')).toBe('https://openrouter.ai/api/v1/chat/completions')
+  expect(chatUrl('http://h/v1/chat/completions')).toBe('http://h/v1/chat/completions')
+  expect(hostOf('https://user:pw@api.example.com/v1')).toBe('https://api.example.com')
+  expect(chatAnswer(200, '{"choices":[{"message":{"content":"{}"}}]}')).toMatchObject({ isAnswered: true, text: '{}' })
+  expect(chatAnswer(200, '{"choices":[{"message":{"content":""},"finish_reason":"length"}]}')).toMatchObject({ isAnswered: false, reason: 'endpoint: empty answer (cut off at max tokens)' })
+  expect(chatAnswer(500, 'oops').isAnswered).toBe(false)
 })

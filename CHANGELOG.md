@@ -2,6 +2,14 @@
 
 Each version is tagged `vX.Y.Z` and has a [GitHub release](https://github.com/jaklimoff/claude-grammar/releases) with its section below as the notes. Bump `version` in `.claude-plugin/plugin.json` on every change to what ships: installed copies update only when it changes. How releases work: [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-releases).
 
+## 1.7.0 (2026-11-05)
+
+- Any OpenAI-compatible endpoint in place of Claude's models: a local server (llama.cpp, LM Studio, Ollama, vLLM) or a remote one (OpenRouter, OpenAI, a gateway). Set `endpoint` (like `http://localhost:9931` or `https://openrouter.ai/api/v1`), `endpoint_model`, and `endpoint_key` when it needs one. The checks, `/grammar review` and `/grammar ask` then all go there, and nothing goes to Claude's models.
+- The key is sent as a Bearer token, kept in secure storage (a `sensitive` setting), and never shown: errors mask it and the help names only the endpoint's host.
+- Thinking is turned off for llama.cpp-style servers (`chat_template_kwargs`): a thinking model spent minutes and its whole token budget on one short prompt. A server that refuses that field, `max_tokens` (it wants `max_completion_tokens`) or `temperature` with a 400 is asked again without it, and the form that worked is kept for the session.
+- A local server gets 120 s per check instead of 30, since it may first have to load the model. A Cowork prompt still waits at most 15 s.
+- `/grammar help` and `/grammar stats` name the model that will answer instead of always saying Sonnet.
+
 ## 1.6.0 (2026-11-05)
 
 - Cowork tasks in the desktop app load the plugin but draw nothing from it, so no prompt was checked there ([#3](https://github.com/jaklimoff/claude-grammar/issues/3), thanks [@ArnauMontagud](https://github.com/ArnauMontagud)). Now a Cowork prompt waits for its check, a second or two, and when it has mistakes Claude ends its reply with them: the fixes line and the native-speaker line as plain text. A clean prompt, another language or a failed check adds nothing; 3 failures in a row pause the checks.

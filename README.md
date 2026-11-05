@@ -100,6 +100,22 @@ Under `/config`, or in `settings.json` under `pluginConfigs` → `grammar@gramma
 | `history` | `true` | Keeps each fix for `/grammar stats` and `/grammar review`. Same as `/grammar history on\|off`. |
 | `ask_memory` | `true` | `/grammar ask` remembers the last 5 asks and reviews of the session for follow-ups. Same as `/grammar ask memory on\|off`. |
 | `cowork` | `true` | In a Cowork task, which shows no plugin output, the prompt waits for its check and Claude ends its reply with the fixes. Off, Cowork prompts aren't checked. See [In Cowork](#in-cowork). |
+| `endpoint` | empty | An OpenAI-compatible API to use instead of Claude's models, local or not. See [Another model](#another-model). |
+| `endpoint_model` | empty | The model to ask the endpoint for. Empty: its default. |
+| `endpoint_key` | empty | The endpoint's API key, sent as a Bearer token. Kept in secure storage, not `settings.json`. |
+
+### Another model
+
+Set `endpoint` and the checks, `/grammar review` and `/grammar ask` all go to that OpenAI-compatible API (`/v1/chat/completions`) instead of Claude's models:
+
+| Server | `endpoint` | `endpoint_model` | `endpoint_key` |
+|---|---|---|---|
+| llama.cpp | `http://localhost:9931` (its default port) | empty for the one model it serves, else an id from `/v1/models` | |
+| LM Studio | `http://localhost:1234/v1` | the loaded model's id | |
+| Ollama | `http://localhost:11434/v1` | a pulled model's name | |
+| OpenRouter | `https://openrouter.ai/api/v1` | a model id from openrouter.ai/models | `sk-or-...` |
+
+`model` and `effort` then don't apply. Thinking is turned off where the server supports llama.cpp's `chat_template_kwargs`; a server that refuses it, `max_tokens` or `temperature` gets the request again without it. A local model needs to follow the JSON answer format well: Gemma 4 26B does. A check that can't be read shows as `no grammar check` under the prompt, like any failed check.
 
 ## Ignore and skip lists
 
@@ -221,7 +237,7 @@ bun tools/import-history.ts --days 30       # the last 30 days (default 7, at mo
 
 ## Privacy and cost
 
-Each prompt you type (its first 6000 characters by default, pasted text included) goes to Haiku (or the model you set) through Claude Code's own model access, on the same account and provider as the rest of your session. That is one small call per prompt (Haiku at low effort, unless you change `model` or `effort`), counted in your usage like any other call. `/grammar review`, only when you run it, sends your grouped fixes (not your prompts) to Sonnet the same way. `/grammar ask`, only when you run it, sends your question, your grouped fixes, the fixes from this session's latest prompts and the remembered asks and answers. Nothing goes anywhere else.
+Each prompt you type (its first 6000 characters by default, pasted text included) goes to Haiku (or the model you set) through Claude Code's own model access, on the same account and provider as the rest of your session. That is one small call per prompt (Haiku at low effort, unless you change `model` or `effort`), counted in your usage like any other call. `/grammar review`, only when you run it, sends your grouped fixes (not your prompts) to Sonnet the same way. `/grammar ask`, only when you run it, sends your question, your grouped fixes, the fixes from this session's latest prompts and the remembered asks and answers. With `endpoint` set, all of it goes to that endpoint instead, and none of it to Claude's models: a local server keeps it on your machine, a remote one gets it under its own terms. Nothing goes anywhere else.
 
 The fixes are kept on your disk in `grammar-history.json` (see [Your mistakes over time](#your-mistakes-over-time)). They are short bits of what you typed, from every project. `/grammar history off` stops keeping them, `/grammar history clear` empties the file, and `"history": false` in a project's `.claude/grammar.json` keeps nothing from that project.
 
@@ -242,18 +258,19 @@ A mod is code that runs inside Claude Code with your permissions, so read it bef
 | API | For |
 |---|---|
 | `$.model.complete` | The Haiku call, and the Sonnet calls of `/grammar review` and `/grammar ask`. |
+| `$.http.fetch` | Only with `endpoint` set: the same calls, to that endpoint instead. |
 | `$.state` | The checks, reviews, asks and what follow-ups remember, in memory for the session. |
 | `$.config.list`, `$.config.set` | Finding the settings' keys, and saving `/grammar on\|off`, `natural on\|off`, `history on\|off` and `ask memory on\|off` as settings. |
 | `$.store` | Reading and clearing where 1.0 kept the two switches, once, and noting that the history notice has shown. |
 | `$.command.register` | `/grammar`. |
 | `$.fs.exists`, `$.fs.read`, `$.fs.write`, `$.env.get`, `$.session.root` | Finding and reading your `grammar.json` files, and keeping `grammar-history.json`. Writes go only to two files in your Claude Code folder: the global `grammar.json` on `/grammar ignore add\|rm`, and the history after each check and on `/grammar history clear`. |
-| `$.clock.now` | The time on each kept fix. |
+| `$.clock.now`, `$.clock.sleep` | The time on each kept fix, and the endpoint call's timeout. |
 | `$.ui.toast` | The one notice for a file that doesn't parse, the one naming the history file until it exists, and each check's fixes in the desktop app when `desktop` is `toast`. |
 | `$.ui.log` | Each check's fixes as a dim transcript line in the desktop app, where the line under the prompt isn't drawn (the `desktop` setting, `band` by default, which adds the colored band too). |
 | `$.session.surfaces` | Skipping runs that draw nowhere, and telling a Cowork task (no surface, and `CLAUDE_CODE_ENTRYPOINT` read through `$.env.get`) from them. |
 | `$.clock.after`, `$.ui.resolve` | Running the check off the prompt's path, and drawing the lines. |
 
-No other files, no processes, no other network. `claude plugin validate .` prints the same list for any mod. The full note is in [PRIVACY.md](PRIVACY.md).
+No other files, no processes, and no network but your `endpoint` when you set one. `claude plugin validate .` prints the same list for any mod. The full note is in [PRIVACY.md](PRIVACY.md).
 
 ## Requirements
 
@@ -264,7 +281,7 @@ No other files, no processes, no other network. `claude plugin validate .` print
 
 ## How it works
 
-The plugin is four files: `hooks/grammar.tsx` (the hooks, commands and drawing), `hooks/check.ts` (the check's prompt and the reply's parsing), `hooks/config.ts` (settings and ignore lists) and `hooks/history.ts` (the kept fixes, stats, and the review's and ask's prompts). `tools/import-history.ts` uses the same `check.ts` and `history.ts` outside Claude Code. It is a Claude Code mod: a plugin whose `hooks/hooks.json` lists a module that runs inside Claude Code ([mods docs](https://code.claude.com/docs/en/plugins/mods/overview)). It hooks these events:
+The plugin is five files: `hooks/grammar.tsx` (the hooks, commands and drawing), `hooks/check.ts` (the check's prompt and the reply's parsing), `hooks/config.ts` (settings and ignore lists), `hooks/history.ts` (the kept fixes, stats, and the review's and ask's prompts) and `hooks/endpoint.ts` (the OpenAI-compatible call, when `endpoint` is set). `tools/import-history.ts` uses the same `check.ts` and `history.ts` outside Claude Code. It is a Claude Code mod: a plugin whose `hooks/hooks.json` lists a module that runs inside Claude Code ([mods docs](https://code.claude.com/docs/en/plugins/mods/overview)). It hooks these events:
 
 | Event | What it does |
 |---|---|

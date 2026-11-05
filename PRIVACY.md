@@ -10,7 +10,9 @@ Each prompt you type in Claude Code (its first 6000 characters by default, the `
 
 `/grammar ask`, only when you type it, sends your question, the kept fixes for the period (grouped, with counts), the fixes from this session's latest prompts (at most 10; not the prompts), and, while ask memory is on, the session's last 5 asks and reviews with their answers, to Sonnet the same way, or to your `model` setting when your account can't use Sonnet.
 
-Nothing is sent anywhere else: the plugin makes no other network requests and starts no processes.
+With the `endpoint` setting set, all three of these go to that OpenAI-compatible endpoint instead, and nothing goes to Claude's models. A local server (`http://localhost:...`) keeps them on your machine; a remote one (OpenRouter, OpenAI, a gateway) gets your prompts under its own terms. The `endpoint_key` setting, when set, is sent to it as a Bearer token and kept in Claude Code's secure storage, not in `settings.json`.
+
+Nothing is sent anywhere else: the plugin makes no other network requests (none at all while `endpoint` is empty) and starts no processes.
 
 ## What it keeps
 

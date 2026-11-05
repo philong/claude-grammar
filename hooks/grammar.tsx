@@ -18,6 +18,7 @@ import {
 } from './config'
 import type { Ignore, Lists, Settings } from './config'
 import { keepFixes, parseReply, system, typedPart } from './check'
+import { endpointComplete, hostOf } from './endpoint'
 import {
   ASK_MEMORY,
   ASK_RECENT,
@@ -241,14 +242,24 @@ const migrate = async ($: EngineInterface) => {
   return moved
 }
 
-const ask = async ($: EngineInterface, s: Settings, text: string, natural: boolean, kind: boolean, ignore: Ignore, timeoutMs = 30000) => {
+/** The model that answers: the endpoint's when one is set, else `fallback` (the `model` setting for checks, Sonnet for reviews and asks). */
+export const modelName = (s: Settings, fallback: string) => (s.endpoint === '' ? fallback : s.endpointModel || 'the default model')
+
+/** Who checks the prompts, for the help and the on message. */
+export const checkerOf = (s: Settings) => (s.endpoint === '' ? s.model : `${modelName(s, s.model)} at ${hostOf(s.endpoint)}`)
+
+const ask = async ($: EngineInterface, s: Settings, text: string, natural: boolean, kind: boolean, ignore: Ignore, timeoutMs?: number) => {
   const request = {
     model: s.model,
     system: system({ natural, dialect: s.dialect, showWhy: s.showWhy, kind, ignore: ignore.words }),
     prompt: cut(text, s.maxChars),
     maxTokens: 4096,
     effort: s.effort,
-    timeoutMs,
+    timeoutMs: timeoutMs ?? 30000,
+  }
+  if (s.endpoint !== '') {
+    // Longer by default: a local server may first have to load the model.
+    return endpointComplete($, s.endpoint, s.endpointModel, s.endpointKey, { ...request, timeoutMs: timeoutMs ?? 120000 })
   }
   try {
     return await $.model.complete(request)
@@ -422,15 +433,15 @@ const queue = async ($: EngineInterface, s: Settings, e: { text: string }) => {
   })
 }
 
-const USAGE = `/grammar help: this list, and what is on now
+const usage = (s: Settings) => `/grammar help: this list, and what is on now
 /grammar [on|off]: the English check of your prompts
 /grammar natural [on|off]: the native-speaker line
 /grammar ignore add <words>: never flag these (phrases: separate with commas)
 /grammar ignore rm <words>: flag them again
 /grammar ignore: the ignore and skip lists, and their files
 /grammar stats [7d|30d|since 2026-10-01]: your most frequent mistakes, from the kept fixes
-/grammar review [7d|30d|since 2026-10-01]: a summary, then advice on them from Sonnet (one call, from ${REVIEW_FROM} fixes)
-/grammar ask [7d|30d|since 2026-10-01] <question>: ask Sonnet about your English, with your fixes at hand (one call)
+/grammar review [7d|30d|since 2026-10-01]: a summary, then advice on them from ${modelName(s, 'Sonnet')} (one call, from ${REVIEW_FROM} fixes)
+/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your English, with your fixes at hand (one call)
 /grammar ask list|clear: what follow-ups remember (the last ${ASK_MEMORY} asks and reviews), or forget it
 /grammar ask memory [on|off]: remembering asks for follow-ups
 /grammar history [on|off|clear]: keeping fixes for stats and review
@@ -494,6 +505,12 @@ type Request = Omit<Parameters<EngineInterface['model']['complete']>[0], 'model'
 
 /** One call to Sonnet, else the check's own model when Sonnet is not allowed or not available. Why not, when neither answered. */
 const complete = async ($: EngineInterface, s: Settings, request: Request): Promise<{ text: string; model: string } | { refused: string }> => {
+  if (s.endpoint !== '') {
+    // The endpoint only: nothing goes to Claude's models once one is set.
+    const flat = (x: Request['prompt'] | undefined) => (x === undefined ? '' : typeof x === 'string' ? x : x.map(b => b.text).join(''))
+    const r = await endpointComplete($, s.endpoint, s.endpointModel, s.endpointKey, { system: flat(request.system), prompt: flat(request.prompt), maxTokens: request.maxTokens ?? 4096, timeoutMs: request.timeoutMs ?? 120000 })
+    return r.isAnswered ? { text: r.text.trim(), model: modelName(s, 'sonnet') } : { refused: r.reason }
+  }
   let refused = ''
   for (const model of [...new Set(['sonnet', s.model])]) {
     let r: Awaited<ReturnType<typeof $.model.complete>>
@@ -585,7 +602,7 @@ const askCommand = async ($: EngineInterface, s: Settings, words: string) => {
   const w = words.trim()
   const lower = w.toLowerCase()
   if (lower === '' || lower === 'help') {
-    const how = `/grammar ask [7d|30d|since 2026-10-01] <question>: ask Sonnet about your English, with your kept fixes at hand.\n/grammar ask list|clear, /grammar ask memory on|off.`
+    const how = `/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your English, with your kept fixes at hand.\n/grammar ask list|clear, /grammar ask memory on|off.`
     return `${how}\n\n${await askList($)}`
   }
   if (lower === 'list') {
@@ -727,17 +744,17 @@ export const register: Register = (on, options) => {
         const check = !enabled ? 'off' : paused ? `paused after ${MAX_FAILS} failures (/grammar on resumes)` : 'on'
         const now = [
           `Check: ${check}. Natural line: ${(await read($, isNatural)) ? 'on' : 'off'}.`,
-          `Model: ${s.model}, effort ${s.effort}, spelling ${s.dialect}, at least ${s.minWords} words, up to ${s.maxChars} characters.`,
+          `Model: ${checkerOf(s)}${s.endpoint === '' ? `, effort ${s.effort}` : ''}, spelling ${s.dialect}, at least ${s.minWords} words, up to ${s.maxChars} characters.`,
           await historyLine($),
           (await read($, askMemory))
             ? `Ask memory: on, ${plural((await read($, thread)).length, 'exchange')} remembered (/grammar ask list).`
             : 'Ask memory: off.',
         ]
-        return { text: `${now.join('\n')}\n\n${USAGE}` }
+        return { text: `${now.join('\n')}\n\n${usage(s)}` }
       }
       case 'natural': {
         if (sub !== '' && sub !== 'on' && sub !== 'off') {
-          return { text: USAGE }
+          return { text: usage(s) }
         }
         const natural = sub === 'on' ? true : sub === 'off' ? false : !(await read($, isNatural))
         await update($, isNatural, () => natural)
@@ -760,7 +777,7 @@ export const register: Register = (on, options) => {
         if (typeof period === 'string') {
           return { text: period }
         }
-        return { text: statsText(loaded.h, loaded.ignore, now, loaded.path, await read($, keepsHistory), period, words) }
+        return { text: statsText(loaded.h, loaded.ignore, now, loaded.path, await read($, keepsHistory), period, words, modelName(s, 'Sonnet')) }
       }
       case 'review':
         return { text: await review($, s, rest.join(' ')) }
@@ -769,7 +786,7 @@ export const register: Register = (on, options) => {
         return { text: await askCommand($, s, e.args.trim().slice(first.length)) }
       case 'history': {
         if (sub !== '' && sub !== 'on' && sub !== 'off' && sub !== 'clear') {
-          return { text: USAGE }
+          return { text: usage(s) }
         }
         return { text: await historyCommand($, sub) }
       }
@@ -781,7 +798,7 @@ export const register: Register = (on, options) => {
         if ((sub === 'add' || sub === 'rm') && words.length > 0) {
           return { text: await editIgnore($, sub, words) }
         }
-        return { text: USAGE }
+        return { text: usage(s) }
       }
       case '':
       case 'on':
@@ -793,11 +810,11 @@ export const register: Register = (on, options) => {
         }
         const why = await persist($, 'enabled', want)
         return {
-          text: (want ? `English check on: ${s.model} checks each prompt you send.` : 'English check off.') + sessionOnly(why),
+          text: (want ? `English check on: ${checkerOf(s)} checks each prompt you send.` : 'English check off.') + sessionOnly(why),
         }
       }
       default:
-        return { text: USAGE }
+        return { text: usage(s) }
     }
   })
 

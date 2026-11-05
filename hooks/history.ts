@@ -351,7 +351,7 @@ export const summaryText = (m: Summary) =>
   ].join('\n')
 
 /** What /grammar stats prints, for a period (everything kept when none is given). */
-export const statsText = (h: History, ignore: Ignore, now: number, path: string, on: boolean, period?: Period, words = '') => {
+export const statsText = (h: History, ignore: Ignore, now: number, path: string, on: boolean, period?: Period, words = '', reviewer = 'Sonnet') => {
   const p = period ?? (parsePeriod('', now) as Period)
   const where = `Kept in ${path}.${on ? '' : ' The history is off: /grammar history on keeps new fixes.'}`
   if (h.fixes.length === 0 && h.days.length === 0) {
@@ -386,7 +386,7 @@ export const statsText = (h: History, ignore: Ignore, now: number, path: string,
   lines.push(
     '',
     m.fixes >= REVIEW_FROM
-      ? `/grammar review${forPeriod}: advice on these from Sonnet (one call).`
+      ? `/grammar review${forPeriod}: advice on these from ${reviewer} (one call).`
       : `/grammar review gives advice from ${REVIEW_FROM} fixes; ${m.fixes} so far.`,
     where,
   )

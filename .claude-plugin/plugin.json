@@ -1,7 +1,7 @@
 {
   "name": "grammar",
-  "version": "1.6.0",
-  "description": "Checks the English of each prompt you send to Claude Code, shows the fixes under it, and keeps them so /grammar stats and /grammar review show the mistakes you make most, and /grammar ask answers your questions about them. Sends each prompt you type to Haiku (one small call per prompt), and the kept fixes to Sonnet when you run /grammar review or /grammar ask, through your own Claude Code session",
+  "version": "1.7.0",
+  "description": "Checks the English of each prompt you send to Claude Code, shows the fixes under it, and keeps them so /grammar stats and /grammar review show the mistakes you make most, and /grammar ask answers your questions about them. Sends each prompt you type to Haiku (one small call per prompt), and the kept fixes to Sonnet when you run /grammar review or /grammar ask, through your own Claude Code session, or all of it to an OpenAI-compatible endpoint you set (llama.cpp, LM Studio, Ollama, OpenRouter)",
   "author": {
     "name": "Jack Klimov",
     "url": "https://jack.direct"
@@ -116,6 +116,25 @@
       "title": "Fixes in Cowork replies",
       "description": "Cowork tasks show no plugin output, so there each prompt waits a second or two for its check, and Claude ends its reply with the fixes. Off, Cowork prompts are not checked.",
       "default": true
+    },
+    "endpoint": {
+      "type": "string",
+      "title": "OpenAI-compatible endpoint",
+      "description": "An OpenAI-compatible API to use instead of Claude's models for the checks, /grammar review and /grammar ask: local (http://localhost:9931 for llama.cpp) or not (https://openrouter.ai/api/v1). Your prompts then go there. Empty: Claude's models.",
+      "default": ""
+    },
+    "endpoint_model": {
+      "type": "string",
+      "title": "Endpoint model",
+      "description": "The model to ask the endpoint for, like gemma-4-26b-a4b-qat. Empty: the endpoint's default. Used only when the endpoint is set.",
+      "default": ""
+    },
+    "endpoint_key": {
+      "type": "string",
+      "title": "Endpoint API key",
+      "description": "Sent as a Bearer token to the endpoint, when it needs one. Kept in secure storage, not settings.json.",
+      "default": "",
+      "sensitive": true
     }
   },
   "license": "MIT",

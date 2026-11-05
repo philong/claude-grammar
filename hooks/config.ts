@@ -23,6 +23,10 @@ export type Settings = {
   clean: boolean
   askMemory: boolean
   cowork: boolean
+  // An OpenAI-compatible endpoint to use instead of Claude's models ('' for none), the model to ask it for, and its API key ('' for none).
+  endpoint: string
+  endpointModel: string
+  endpointKey: string
 }
 
 const pick = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
@@ -47,6 +51,9 @@ export const settingsFrom = (o: PluginOptions): Settings => ({
   clean: o.clean !== false,
   askMemory: o.ask_memory !== false,
   cowork: o.cowork !== false,
+  endpoint: typeof o.endpoint === 'string' ? o.endpoint.trim() : '',
+  endpointModel: typeof o.endpoint_model === 'string' ? o.endpoint_model.trim() : '',
+  endpointKey: typeof o.endpoint_key === 'string' ? o.endpoint_key.trim() : '',
 })
 
 /**
