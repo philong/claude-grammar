@@ -1,6 +1,6 @@
 // The mistake history: fixes kept across sessions for /grammar stats and /grammar review. Plain functions, no engine calls.
 import type { GrammarFix } from '../types'
-import { ENGLISH, isIgnored, languageOf } from './config'
+import { ENGLISH, isIgnored, languageOf, languagesOf } from './config'
 import type { Ignore } from './config'
 
 /** What kind of mistake a fix corrects; the model picks one, anything else is "other". */
@@ -234,12 +234,13 @@ export const splitLanguage = (words: string, known: readonly string[]): { lang?:
 }
 
 /**
- * Which language stats and a review cover: the one named, else the one set when the history holds it, else the one
- * with the most checked prompts. With the others kept, for a pointer to them.
+ * Which language stats and a review cover: the one named, else the one set (of a list, the most checked) when the
+ * history holds it, else the one with the most checked prompts. With the others kept, for a pointer to them.
  */
 export const pickLanguage = (h: History, named: string | undefined, setting: string) => {
   const all = languagesIn(h)
-  const lang = named ?? (all.some(l => l.lang === setting) ? setting : all[0]?.lang ?? ENGLISH)
+  const set = languagesOf(setting)
+  const lang = named ?? all.find(l => set.includes(l.lang))?.lang ?? all[0]?.lang ?? ENGLISH
   // Named only when it tells something: more than one kept, or not English.
   return { lang, others: all.filter(l => l.lang !== lang), show: all.length > 1 || lang !== ENGLISH }
 }

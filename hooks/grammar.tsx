@@ -15,13 +15,17 @@ import {
   compileSkip,
   cut,
   entriesFrom,
+  joinNames,
+  keptLanguage,
+  languagesOf,
+  lettersFor,
   mergeLists,
   parseLists,
   settingsFrom,
   wordCount,
 } from './config'
 import type { Ignore, Lists, Settings } from './config'
-import { keepFixes, parseReply, system, typedPart } from './check'
+import { fallbackFor, keepFixes, parseReply, system, typedPart } from './check'
 import { endpointComplete, hostOf } from './endpoint'
 import {
   ASK_MEMORY,
@@ -253,8 +257,8 @@ const migrate = async ($: EngineInterface) => {
 /** The model that answers: the endpoint's when one is set, else `fallback` (the `model` setting for checks, Sonnet for reviews and asks). */
 export const modelName = (s: Settings, fallback: string) => (s.endpoint === '' ? fallback : s.endpointModel || 'the default model')
 
-/** What the check is called: "English", "French", or "grammar" in auto. */
-export const languageName = (s: Settings) => (s.language === AUTO ? 'grammar' : s.language)
+/** What the check is called: "English", "French", "English and French" for a list, or "grammar" in auto. */
+export const languageName = (s: Settings) => (s.language === AUTO ? 'grammar' : joinNames(languagesOf(s.language), 'and'))
 
 /** Who checks the prompts, for the help and the on message. */
 export const checkerOf = (s: Settings) => (s.endpoint === '' ? s.model : `${modelName(s, s.model)} at ${hostOf(s.endpoint)}`)
@@ -296,12 +300,14 @@ const run = async ($: EngineInterface, s: Settings, id: number, text: string) =>
     result = { id, text, status: 'error', fixes: [], error: r.reason }
   } else {
     try {
-      const reply = parseReply(r.text, s.language === AUTO ? undefined : s.language)
+      const reply = parseReply(r.text, fallbackFor(s.language))
+      // A language set is the one kept, however the model spells it; in a list, a language not listed is not checked.
+      const language = reply === null ? undefined : keptLanguage(s.language, reply.language)
       const fixes = reply === null ? [] : keepFixes(reply.fixes, text, ignore)
-      // A language set is the one kept, however the model spells it.
-      const language = s.language === AUTO ? reply?.language : s.language
       result =
-        reply === null ? null : { id, text, status: 'done', fixes, natural: usefulNatural(reply.natural, text, fixes, ignore), language }
+        reply === null || language === undefined
+          ? null
+          : { id, text, status: 'done', fixes, natural: usefulNatural(reply.natural, text, fixes, ignore), language }
     } catch (err) {
       result = { id, text, status: 'error', fixes: [], error: message(err) }
     }
@@ -366,9 +372,8 @@ const checkable = async ($: EngineInterface, s: Settings, e: { text: string }) =
   // Slash commands and hidden prompts are not typed prose. Loose, as older type builds lack both fields.
   const { command, isMeta } = e as { command?: unknown; isMeta?: boolean }
   const text = typedPart(e.text)
-  // English needs Latin letters; another language or auto, letters of any script.
-  const letters = s.language === ENGLISH ? /[A-Za-z]{2}/ : LETTERS
-  if (command !== undefined || isMeta === true || !letters.test(text) || wordCount(text) < s.minWords) {
+  // English needs Latin letters; another language, a list or auto, letters of any script.
+  if (command !== undefined || isMeta === true || !lettersFor(s.language).test(text) || wordCount(text) < s.minWords) {
     return undefined
   }
   if (!(await read($, isOn)) || (await read($, fails)) >= MAX_FAILS) {
@@ -414,13 +419,14 @@ const checkForReply = async ($: EngineInterface, s: Settings, e: { text: string 
   const r = await ask($, s, text, natural, false, ignore, COWORK_TIMEOUT_MS)
   let reply: ReturnType<typeof parseReply> | undefined
   try {
-    reply = r.isAnswered ? parseReply(r.text) : undefined
+    reply = r.isAnswered ? parseReply(r.text, fallbackFor(s.language)) : undefined
   } catch {
     reply = undefined
   }
   // Failures still count, so a blocked model stops holding up every prompt after MAX_FAILS.
   await update($, fails, k => (reply === undefined ? k + 1 : 0))
-  if (reply === undefined || reply === null) {
+  // In a list, a language not listed is not checked.
+  if (reply === undefined || reply === null || keptLanguage(s.language, reply.language) === undefined) {
     return undefined
   }
   const fixes = keepFixes(reply.fixes, text, ignore)
@@ -778,7 +784,7 @@ export const register: Register = (on, options) => {
         const check = !enabled ? 'off' : paused ? `paused after ${MAX_FAILS} failures (/grammar on resumes)` : 'on'
         const now = [
           `Check: ${check}. Natural line: ${(await read($, isNatural)) ? 'on' : 'off'}.`,
-          `Language: ${s.language === AUTO ? 'auto (each prompt in its own language)' : s.language}.`,
+          `Language: ${s.language === AUTO ? 'auto (each prompt in its own language)' : languagesOf(s.language).length > 1 ? `${s.language} (each prompt in one of them)` : s.language}.`,
           `Model: ${checkerOf(s)}${s.endpoint === '' ? `, effort ${s.effort}` : ''}, spelling ${s.dialect}, at least ${s.minWords} words, up to ${s.maxChars} characters.`,
           await historyLine($),
           (await read($, askMemory))

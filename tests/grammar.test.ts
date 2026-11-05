@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { applyFixes, compileIgnore, compileSkip, cut, entriesFrom, languageOf, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
+import { applyFixes, compileIgnore, compileSkip, cut, entriesFrom, joinNames, keptLanguage, languageOf, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
 import { BATCH, keepFixes, parseBatch, parseReply, system, typedPart } from '../hooks/check'
 import { STREAK_FROM, checkFor, cleanText, plainText, replyNote, usefulNatural } from '../hooks/grammar'
 import { ASK_MEMORY, askInput, historyText, importWindow, inLanguage, keepable, kindOf, languagesIn, merge, pairsOf, parseHistory, parsePeriod, pickLanguage, prune, record, reviewInput, splitAsk, splitLanguage, statsText, summaryOf, trendOf, within } from '../hooks/history'
@@ -530,6 +530,15 @@ test('in Cowork a clean prompt, another language or a failed check adds nothing'
   expect(await coworkSubmit($, 'das ist gut so')).toEqual([])
   expect(await coworkSubmit($, TYPO)).toEqual([])
   expect(asked.prompts.length).toBe(3)
+})
+
+test('in Cowork with a list of languages, a listed one gets its fixes and another adds nothing', { options: { language: 'English, French' } }, async ($, on) => {
+  const fix = [{ from: 'appea', to: 'appear', why: 'typo' }]
+  const asked = haiku(on, (n: number) => (n === 1 ? { language: 'English', fixes: fix } : { language: 'German', fixes: [{ from: 'ist', to: 'sind', why: 'agreement' }] }), [])
+  env.CLAUDE_CODE_ENTRYPOINT = 'remote_cowork'
+  expect(await coworkSubmit($, TYPO)).toEqual([replyNote('✎ appea → appear (typo)')])
+  expect(await coworkSubmit($, 'das ist gut so')).toEqual([])
+  expect(asked.prompts.length).toBe(2)
 })
 
 test('three failed checks in a row stop holding up Cowork prompts', async ($, on) => {
@@ -1505,6 +1514,40 @@ test('a language set: the prompt names it, other languages are skipped, and its 
   expect((await $.command.run({ command: 'grammar', args: 'on' } as never)).text).toContain('French check on')
 })
 
+test('a list: each prompt is checked in one of the languages, others are skipped, and each is kept under its own', { options: { language: 'english, French,french' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const replies: Record<string, unknown> = {
+    'mets le table dans le fichier': { language: 'French', fixes: [{ from: 'le table', to: 'la table', why: 'genre', kind: 'agreement' }] },
+    [TYPO]: { ...FIXES, language: 'American English' },
+    'pon la mesa en el archivo': { language: 'Spanish', fixes: [{ from: 'pon', to: 'pone', why: '', kind: 'other' }] },
+    'stell den Tisch in die Datei': { language: null, fixes: [] },
+  }
+  const asked = haiku(on, (n: number) => Object.values(replies)[n - 1])
+  for (const text of Object.keys(replies)) {
+    await $.prompt.submit({ text } as never)
+    await clock.advance(5)
+  }
+  expect(asked.systems[0]).toContain('You proofread a prompt typed to a coding assistant in English or French;')
+  expect(asked.systems[0]).toContain('"language": "<its main language: English or French>"')
+  expect(asked.systems[0]).toContain('If the text is not mainly English or French, answer {"language": null')
+  expect(asked.systems[0]).toContain('In English text: Accept American and British spelling alike.')
+  expect((await (await mountRow($, 'mets le table dans le fichier')).find({ key: 'gr-fixes' }))?.text).toContain('la table')
+  expect((await (await mountRow($, TYPO)).find({ key: 'gr-fixes' }))?.text).toContain('appear')
+  // A language not listed shows nothing, even when the model checked it anyway.
+  expect(await (await mountRow($, 'pon la mesa en el archivo')).find({ key: 'grammar' })).toBeUndefined()
+  expect(await (await mountRow($, 'stell den Tisch in die Datei')).find({ key: 'grammar' })).toBeUndefined()
+  // "American English" is kept as English; the Spanish and German prompts are not counted.
+  const h = parseHistory(asked.files.get(HISTORY_FILE) ?? '')
+  expect(h.fixes.map(f => f.lang ?? 'English')).toEqual(['French', 'English', 'English'])
+  expect(h.days.map(d => [d.lang ?? 'English', d.checked]).sort()).toEqual([['English', 1], ['French', 1]])
+
+  const help = (await $.command.run({ command: 'grammar', args: 'help' } as never)).text ?? ''
+  expect(help).toContain('Language: English, French (each prompt in one of them).')
+  expect((await $.command.run({ command: 'grammar', args: 'on' } as never)).text).toContain('English and French check on')
+  // Stats default to the listed language with the most checked prompts, then the most fixes.
+  expect((await $.command.run({ command: 'grammar', args: 'stats' } as never)).text).toContain('Everything kept, English (')
+})
+
 test('auto: each prompt is checked in its own language, any script, and kept under it', { options: { language: 'auto' } }, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const replies: Record<string, unknown> = {
@@ -1566,6 +1609,19 @@ test('language helpers: names, replies, word counts, and the history by language
   expect(languageOf('AUTO')).toBe('auto')
   expect(languageOf('')).toBeUndefined()
   expect(settingsFrom({ language: 'german' }).language).toBe('German')
+  expect(settingsFrom({ language: ' german, brazilian portuguese ,, German' }).language).toBe('German, Brazilian Portuguese')
+  expect(settingsFrom({ language: 'french, Auto' }).language).toBe('auto')
+  expect(settingsFrom({ language: ' , ' }).language).toBe('English')
+  expect(keptLanguage('English, French', 'french')).toBe('French')
+  expect(keptLanguage('English, French', 'British English')).toBe('English')
+  expect(keptLanguage('Portuguese, Brazilian Portuguese', 'Brazilian Portuguese')).toBe('Brazilian Portuguese')
+  expect(keptLanguage('English, French', 'Spanish')).toBeUndefined()
+  expect(keptLanguage('French', 'Français')).toBe('French')
+  expect(keptLanguage('auto', 'Spanish')).toBe('Spanish')
+  expect(joinNames(['English', 'French', 'German'])).toBe('English, French or German')
+  expect(system({ natural: false, language: 'French, German' })).not.toContain('American')
+  // One language in a list is that language: English keeps its own prompt.
+  expect(system({ natural: true, language: settingsFrom({ language: 'english,' }).language })).toBe(system({ natural: true }))
 
   expect(parseReply('{"language": "french", "fixes": []}')?.language).toBe('French')
   expect(parseReply('{"language": null, "fixes": []}')).toBeNull()

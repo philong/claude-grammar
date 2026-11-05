@@ -15,8 +15,8 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
 import type { GrammarFix, GrammarReply } from '../types'
-import { BATCH, keepFixes, parseBatch, system, typedPart } from '../hooks/check'
-import { AUTO, EMPTY, ENGLISH, LETTERS, compileIgnore, compileSkip, cut, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
+import { BATCH, fallbackFor, keepFixes, parseBatch, system, typedPart } from '../hooks/check'
+import { AUTO, EMPTY, compileIgnore, compileSkip, cut, joinNames, keptLanguage, languagesOf, lettersFor, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
 import type { Lists, Settings } from '../hooks/config'
 import { EMPTY_HISTORY, KEEP_DAYS, dayOf, historyText, importWindow, merge, parseHistory, record } from '../hooks/history'
 import type { History } from '../hooks/history'
@@ -96,7 +96,7 @@ const findPrompts = async (from: number, to: number, s: Settings): Promise<{ pro
       const text = typedPart(p.text.trim())
       // Slash commands, and lines Claude Code wraps in tags (command output, ! shell input); pasted text is checked as the plugin checks it.
       const tagged = text.startsWith('<') && !text.startsWith('<pasted_content')
-      if (text.startsWith('/') || tagged || !(s.language === ENGLISH ? /[A-Za-z]{2}/ : LETTERS).test(text) || wordCount(text) < s.minWords) {
+      if (text.startsWith('/') || tagged || !lettersFor(s.language).test(text) || wordCount(text) < s.minWords) {
         continue
       }
       const lists = mergeLists(readLists(join(configDir, 'grammar.json')), readLists(join(p.cwd, '.claude', 'grammar.json')))
@@ -200,7 +200,7 @@ const main = async () => {
       try {
         const r = await complete(sys, input, s)
         cost += r.cost
-        const replies = parseBatch(r.text, s.language === AUTO ? undefined : s.language)
+        const replies = parseBatch(r.text, fallbackFor(s.language))
         // A reply that answers none of the texts is a failed call: asked again.
         if (replies.size === 0) {
           throw new Error(`no usable answer: ${r.text.slice(0, 120)}`)
@@ -231,9 +231,9 @@ const main = async () => {
           continue
         }
         const lists = mergeLists(global, readLists(join(p.cwd, '.claude', 'grammar.json')))
-        // A language set is the one kept, however the model spells it.
-        const language = s.language === AUTO ? reply?.language ?? ENGLISH : s.language
-        results.set(p.id, reply === null ? null : { fixes: keepFixes(reply.fixes, p.text, compileIgnore(lists.ignore)), language })
+        // A language set is the one kept, however the model spells it; in a list, a language not listed is not checked.
+        const language = reply === null ? undefined : keptLanguage(s.language, reply.language)
+        results.set(p.id, reply === null || language === undefined ? null : { fixes: keepFixes(reply.fixes, p.text, compileIgnore(lists.ignore)), language })
       }
       done += 1
       process.stdout.write(`\r  ${done}/${calls.length} calls`)
@@ -268,11 +268,11 @@ const main = async () => {
   const checked = imported.days.reduce((n, d) => n + d.checked, 0)
   const withFixes = imported.days.reduce((n, d) => n + d.withFixes, 0)
   const notChecked = [...results.values()].filter(r => r === null).length
-  const which = s.language === AUTO ? '' : ` in ${s.language}`
+  const which = s.language === AUTO ? '' : ` in ${joinNames(languagesOf(s.language))}`
   const failed = prompts.length - results.size
   console.log(
     `${checked} prompts${which} checked, ${withFixes} with a fix, ${imported.fixes.length} fixes kept; ` +
-      `${notChecked} ${s.language === AUTO ? 'with no prose to check' : `not in ${s.language}`}${failed > 0 ? `, ${failed} left out (no usable answer)` : ''}. Cost about $${cost.toFixed(3)}.\n` +
+      `${notChecked} ${s.language === AUTO ? 'with no prose to check' : `not in ${joinNames(languagesOf(s.language))}`}${failed > 0 ? `, ${failed} left out (no usable answer)` : ''}. Cost about $${cost.toFixed(3)}.\n` +
       `Written to ${historyPath}. /grammar stats shows them.`,
   )
 }

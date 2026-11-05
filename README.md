@@ -2,7 +2,7 @@
 
 [![test](https://github.com/jaklimoff/claude-grammar/actions/workflows/test.yml/badge.svg)](https://github.com/jaklimoff/claude-grammar/actions/workflows/test.yml)
 
-A Claude Code plugin that checks the English of each prompt you send and shows the fixes right under it. It can check another language instead, or each prompt in whatever language it's written in: see [Other languages](#other-languages).
+A Claude Code plugin that checks the English of each prompt you send and shows the fixes right under it. It can check another language instead, a few you choose, or each prompt in whatever language it's written in: see [Other languages](#other-languages).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/jaklimoff/claude-grammar/media/tour-dark.gif">
@@ -90,7 +90,7 @@ Under `/config`, or in `settings.json` under `pluginConfigs` → `grammar@gramma
 | `natural` | `true` | The native-speaker line. Same as `/grammar natural on\|off`. |
 | `model` | `haiku` | `haiku` or `sonnet`. Sonnet catches more and costs more. |
 | `effort` | `low` | `low`, `medium` or `high`. |
-| `language` | `English` | The language your prompts are checked in, named in English: `French`, `German`, `Japanese`... Prompts in other languages are skipped. `auto` checks each prompt in whatever language it's written in. See [Other languages](#other-languages). |
+| `language` | `English` | The language your prompts are checked in, named in English: `French`, `German`, `Japanese`... Several, separated by commas (`English, French`), check each prompt in whichever of them it's in. Prompts in other languages are skipped. `auto` checks each prompt in whatever language it's written in. See [Other languages](#other-languages). |
 | `dialect` | `any` | For English: `any` accepts US and UK spelling. `us` or `uk` flags the other one's spellings. |
 | `min_words` | `2` | Shorter prompts (`ok`, `yes`, `continue`) aren't checked. |
 | `max_chars` | `6000` | How much of a long prompt is checked and sent, cut at a word boundary. |
@@ -151,11 +151,12 @@ The `language` setting picks what is checked:
 
 - **`English`** (the default): as before 1.7, word for word the same system prompt. Prompts in other languages are skipped and cost nothing.
 - **Another language** (`French`, `German`, `Brazilian Portuguese`...): only prompts in that language are checked; the rest are skipped.
+- **A list** (`English, French`): each prompt is checked in whichever of them it's in, and prompts in any other language are skipped, so their fixes stay out of your history. The model tells which language a prompt is in, so a skipped prompt is still a model call. With English in the list, `dialect` applies to the English prompts.
 - **`auto`**: every prompt is checked in its own language, so you can switch from prompt to prompt. Prompts with no prose, only code, are skipped. Each prompt is a model call, whatever its language.
 
 Outside English, the reason under each fix is in the prompt's language, and the native-speaker line is in that language too. Words from another language mixed in (English technical terms in a French prompt, say) are left alone. Prompts in Chinese, Japanese or Thai count about one word per two characters for `min_words`, so `好的` is skipped like `ok`.
 
-Each kept fix and day count remembers its language, and the history keeps them apart. `/grammar stats` and `/grammar review` cover one language: the one you name (`/grammar stats 7d french`, `/grammar review french`), else your `language` setting, else the one you've written the most prompts in. Stats name the others kept (`Also kept: French (12 fixes)`). The review writes its advice in the language it reviews. `/grammar ask` sends the fixes of every language, grouped by language, and answers in the language you ask in. A history from before 1.7 counts as English.
+Each kept fix and day count remembers its language, and the history keeps them apart. `/grammar stats` and `/grammar review` cover one language: the one you name (`/grammar stats 7d french`, `/grammar review french`), else your `language` setting (with a list, the one of them you've written the most prompts in), else the one you've written the most prompts in. Stats name the others kept (`Also kept: French (12 fixes)`). The review writes its advice in the language it reviews. `/grammar ask` sends the fixes of every language, grouped by language, and answers in the language you ask in. A history from before 1.7 counts as English.
 
 ## Your mistakes over time
 
@@ -311,7 +312,7 @@ The check asks Haiku for JSON:
 { "english": true, "fixes": [{ "from": "...", "to": "...", "why": "...", "kind": "preposition" }], "natural": null }
 ```
 
-With another `language` or `auto`, it names the language instead, or `null` for a text it doesn't check:
+With another `language`, a list or `auto`, it names the language instead, or `null` for a text it doesn't check:
 
 ```json
 { "language": "French", "fixes": [{ "from": "...", "to": "...", "why": "...", "kind": "agreement" }], "natural": null }

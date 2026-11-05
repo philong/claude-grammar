@@ -1,7 +1,7 @@
 // The check itself: the system prompt, the reply's parsing and the fixes worth keeping. Plain functions, no engine
 // calls, so tools/import-history.ts can check old prompts exactly as the plugin checks new ones.
 import type { GrammarFix, GrammarReply } from '../types'
-import { AUTO, ENGLISH, isIgnored, languageOf } from './config'
+import { AUTO, ENGLISH, isIgnored, joinNames, languageOf, languagesOf } from './config'
 import type { Dialect, Ignore } from './config'
 import { KINDS, kindOf } from './history'
 
@@ -14,16 +14,21 @@ Report only real mistakes: spelling and typos, grammar (tense, agreement, articl
 Ignore all of these: capitalization (a lowercase "i" or sentence start is fine), punctuation style, apostrophes left out of contractions (lets, dont, im, thats), a casual tone, slang and short forms (smth, pls, u, btw, lol, etc), code, commands, file paths, identifiers, URLs, logs, and quoted or pasted text.
 Keep the writer's voice: change as few words as possible, never rephrase for style.`
 
-/** The opening for auto or another language: what is proofread, and the rules that hold in any language. */
-const base = (language: string) => `${
-  language === AUTO
-    ? 'You proofread a prompt typed to a coding assistant, in whatever language it is written in; the writer may not be a native speaker of it.'
-    : `You proofread ${language} that a non-native speaker typed as a prompt to a coding assistant.`
-}
+/** The opening for auto, another language or a list: what is proofread, and the rules that hold in any language. */
+const base = (language: string) => {
+  const names = languagesOf(language)
+  return `${
+    names.length === 0
+      ? 'You proofread a prompt typed to a coding assistant, in whatever language it is written in; the writer may not be a native speaker of it.'
+      : names.length > 1
+        ? `You proofread a prompt typed to a coding assistant in ${joinNames(names)}; the writer may not be a native speaker of it.`
+        : `You proofread ${language} that a non-native speaker typed as a prompt to a coding assistant.`
+  }
 Check the text in its main language. Words from another language mixed in (English technical terms, say) are fine as they are.
 Report only real mistakes: spelling and typos, grammar (tense, agreement, articles, prepositions, word order and the like), a wrong word, a missing word.
 Ignore all of these: capitalization (a lowercase sentence start, or "i" in English, is fine), punctuation style, apostrophes left out of contractions (lets, dont, im), a casual tone, slang and chat short forms (smth, pls, btw, lol, etc), code, commands, file paths, identifiers, URLs, logs, and quoted or pasted text.
 Keep the writer's voice: change as few words as possible, never rephrase for style.`
+}
 
 const DIALECT: Record<Dialect, string> = {
   any: 'Accept American and British spelling alike.',
@@ -31,13 +36,17 @@ const DIALECT: Record<Dialect, string> = {
   uk: 'The writer uses British English: an American spelling (color, organize) is a spelling mistake.',
 }
 
-/** The spelling rule: as is for English, for English text only in auto, none for another language. */
+/** The spelling rule: as is for English, for English text only in auto or a list with English, none for another language. */
 const dialectRule = (language: string, dialect: Dialect) =>
-  language === ENGLISH ? [DIALECT[dialect]] : language === AUTO ? [`In English text: ${DIALECT[dialect]}`] : []
+  language === ENGLISH
+    ? [DIALECT[dialect]]
+    : language === AUTO || languagesOf(language).includes(ENGLISH)
+      ? [`In English text: ${DIALECT[dialect]}`]
+      : []
 
 const KIND = `, "kind": "<one of: ${KINDS.join(', ')}>"`
 
-/** The answer's shape. English keeps its "english": true|false; auto and another language name the text's language. */
+/** The answer's shape. English keeps its "english": true|false; auto, another language and a list name the text's language. */
 const answer = (language: string, showWhy: boolean, kind: boolean) => {
   const fix = (why: string) => `[{"from": "<exact words from the text>", "to": "<the fixed words>"${showWhy ? `, "why": "<2 to 4 words${why}>"` : ''}${kind ? KIND : ''}}]`
   if (language === ENGLISH) {
@@ -45,11 +54,12 @@ const answer = (language: string, showWhy: boolean, kind: boolean) => {
 {"english": true, "fixes": ${fix('')}}
 "fixes" is [] when the English is fine. If the text is not mainly English, answer {"english": false, "fixes": []}.`
   }
-  const named = language === AUTO ? '<its main language, named in English>' : language
+  const names = languagesOf(language)
+  const named = names.length === 0 ? '<its main language, named in English>' : names.length > 1 ? `<its main language: ${joinNames(names)}>` : language
   const other =
-    language === AUTO
+    names.length === 0
       ? 'If the text holds no natural language (only code, say), answer {"language": null, "fixes": []}.'
-      : `If the text is not mainly ${language}, answer {"language": null, "fixes": []}.`
+      : `If the text is not mainly ${joinNames(names)}, answer {"language": null, "fixes": []}.`
   return `Answer with JSON only, no prose and no code fence:
 {"language": "${named}", "fixes": ${fix(", in the text's language")}}
 "fixes" is [] when the text is fine. ${other}`
@@ -73,7 +83,7 @@ export type PromptParts = {
 }
 
 /**
- * The system prompt: the rules for the language (English by default, or any in auto), the spelling, the user's ignore words, the answer's
+ * The system prompt: the rules for the language (English by default, one of a list, or any in auto), the spelling, the user's ignore words, the answer's
  * shape (with each fix's kind while the history is on), and the natural-phrasing ask when it is on.
  */
 export const system = ({ natural, language = ENGLISH, dialect = 'any', showWhy = true, kind = true, ignore = [] }: PromptParts) => {
@@ -98,7 +108,7 @@ const isFix = (x: unknown): x is GrammarFix => {
 
 /**
  * The reply as fixes, a natural rewrite and the text's language, or null when the text is not one to check (another
- * language than the one set, or none). `fallback` names the language when the reply leaves it out. Throws on a reply
+ * language than the ones set, or none). `fallback` names the language when the reply leaves it out. Throws on a reply
  * that is not the JSON asked for.
  */
 export const parseReply = (text: string, fallback?: string): GrammarReply | null => {
@@ -127,6 +137,9 @@ export const parseReply = (text: string, fallback?: string): GrammarReply | null
   const natural = typeof reply.natural === 'string' && reply.natural.trim() !== '' ? reply.natural.trim() : null
   return { fixes, natural, language }
 }
+
+/** The language a reply leaves out is the one set, when there is just one. */
+export const fallbackFor = (setting: string) => (languagesOf(setting).length === 1 ? setting : undefined)
 
 /** The fixes worth showing: words the prompt holds (the model may quote words that are not there), none on the ignore list. */
 export const keepFixes = (fixes: readonly GrammarFix[], text: string, ignore: Ignore) => {

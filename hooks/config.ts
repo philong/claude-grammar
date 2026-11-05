@@ -13,7 +13,8 @@ export type Settings = {
   natural: boolean
   model: string
   effort: Effort
-  // The language prompts are checked in (a name in English, 'English' by default), or 'auto': each prompt in whatever language it is written in.
+  // The language prompts are checked in (a name in English, 'English' by default), a list of them joined by ", " (each prompt in
+  // one of them), or 'auto': each prompt in whatever language it is written in.
   language: string
   dialect: Dialect
   minWords: number
@@ -49,6 +50,42 @@ export const languageOf = (x: unknown): string | undefined => {
     .join(' ')
 }
 
+/** The `language` setting as kept: one name, several joined by ", " (from commas), or 'auto' when any of them is. Undefined for none. */
+export const languageSetting = (x: unknown): string | undefined => {
+  const names = (typeof x === 'string' ? x.split(',') : []).map(languageOf).filter((n): n is string => n !== undefined)
+  if (names.includes(AUTO)) {
+    return AUTO
+  }
+  const unique = [...new Set(names)]
+  return unique.length === 0 ? undefined : unique.join(', ')
+}
+
+/** The languages a setting names, in its order: [] for auto. */
+export const languagesOf = (setting: string) => (setting === AUTO ? [] : setting.split(', '))
+
+/** Names in a sentence: "French", "English or French", "English, French or German" (`and` for "and"). */
+export const joinNames = (names: readonly string[], and = 'or') =>
+  names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} ${and} ${names[names.length - 1]}`
+
+/**
+ * The language a check is kept under: the reply's in auto, the one set when there is one, and in a list the listed one the
+ * reply names (a whole-word match, so "American English" is English), undefined when it names none of them.
+ */
+export const keptLanguage = (setting: string, said: string): string | undefined => {
+  const names = languagesOf(setting)
+  if (names.length === 0) {
+    return said
+  }
+  if (names.length === 1) {
+    return setting
+  }
+  const words = ` ${said.toLowerCase()} `
+  return names.find(n => n.toLowerCase() === said.toLowerCase()) ?? [...names].sort((a, b) => b.length - a.length).find(n => words.includes(` ${n.toLowerCase()} `))
+}
+
+/** What a prompt needs to be worth a check: two Latin letters for English alone, two letters of any script otherwise. */
+export const lettersFor = (setting: string) => (setting === ENGLISH ? /[A-Za-z]{2}/ : LETTERS)
+
 const pick = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   allowed.includes(value as T) ? (value as T) : fallback
 
@@ -61,7 +98,7 @@ export const settingsFrom = (o: PluginOptions): Settings => ({
   natural: o.natural !== false,
   model: typeof o.model === 'string' && o.model.trim() !== '' ? o.model : 'haiku',
   effort: pick(o.effort, ['low', 'medium', 'high'] as const, 'low'),
-  language: languageOf(o.language) ?? ENGLISH,
+  language: languageSetting(o.language) ?? ENGLISH,
   dialect: pick(o.dialect, ['any', 'us', 'uk'] as const, 'any'),
   minWords: clamp(o.min_words, 1, 50, 2),
   maxChars: clamp(o.max_chars, 200, 20000, 6000),
