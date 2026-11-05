@@ -2,7 +2,7 @@
 
 [![test](https://github.com/jaklimoff/claude-grammar/actions/workflows/test.yml/badge.svg)](https://github.com/jaklimoff/claude-grammar/actions/workflows/test.yml)
 
-A Claude Code plugin that checks the English of each prompt you send and shows the fixes right under it.
+A Claude Code plugin that checks the English of each prompt you send and shows the fixes right under it. It can check another language instead, or each prompt in whatever language it's written in: see [Other languages](#other-languages).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/jaklimoff/claude-grammar/media/tour-dark.gif">
@@ -53,9 +53,9 @@ A prompt with no mistakes gets a green `✓` before it instead. From the third c
 | `/grammar ignore add <words>` | Never flags these words. Separate phrases with commas: `pull request, kubectl`. |
 | `/grammar ignore rm <words>` | Flags them again. |
 | `/grammar ignore` | Shows the ignore and skip lists and the files they're in. |
-| `/grammar stats [period]` | Your mistakes by kind, the fixes you keep repeating, and whether you're making fewer. No model call. |
-| `/grammar review [period]` | A summary card, then the 3 to 5 habits behind most of your mistakes from one Sonnet call, with your own fixes as examples. Needs 20 kept fixes in the period. |
-| `/grammar ask [period] <question>` | Ask Sonnet anything about your English, with your kept fixes and this session's latest fixes at hand. One call. |
+| `/grammar stats [period] [language]` | Your mistakes by kind, the fixes you keep repeating, and whether you're making fewer. No model call. |
+| `/grammar review [period] [language]` | A summary card, then the 3 to 5 habits behind most of your mistakes from one Sonnet call, with your own fixes as examples. Needs 20 kept fixes in the period. |
+| `/grammar ask [period] <question>` | Ask Sonnet anything about your writing, with your kept fixes and this session's latest fixes at hand. One call. |
 | `/grammar ask list` | What follow-ups remember: the last 5 asks and reviews of the session. |
 | `/grammar ask clear` | Forgets them, so the next ask starts fresh. |
 | `/grammar ask memory on\|off` | Remembers asks for follow-ups, or not. |
@@ -90,7 +90,8 @@ Under `/config`, or in `settings.json` under `pluginConfigs` → `grammar@gramma
 | `natural` | `true` | The native-speaker line. Same as `/grammar natural on\|off`. |
 | `model` | `haiku` | `haiku` or `sonnet`. Sonnet catches more and costs more. |
 | `effort` | `low` | `low`, `medium` or `high`. |
-| `dialect` | `any` | `any` accepts US and UK spelling. `us` or `uk` flags the other one's spellings. |
+| `language` | `English` | The language your prompts are checked in, named in English: `French`, `German`, `Japanese`... Prompts in other languages are skipped. `auto` checks each prompt in whatever language it's written in. See [Other languages](#other-languages). |
+| `dialect` | `any` | For English: `any` accepts US and UK spelling. `us` or `uk` flags the other one's spellings. |
 | `min_words` | `2` | Shorter prompts (`ok`, `yes`, `continue`) aren't checked. |
 | `max_chars` | `6000` | How much of a long prompt is checked and sent, cut at a word boundary. |
 | `icons` | `true` | Terminal only: off draws plain characters for terminals without a Nerd Font. The desktop app always draws plain characters. |
@@ -140,13 +141,25 @@ Put a `grammar.json` in your Claude Code folder (`~/.claude/grammar.json`, or `$
 - **Checked:** spelling, grammar (tense, agreement, articles, prepositions, word order), a wrong word, a missing word.
 - **Left alone:** lowercase, punctuation style, dropped apostrophes (`lets`, `dont`), slang and short forms (`smth`, `pls`, `btw`), code, paths, logs and pasted text.
 - **Only a `✓`:** a clean prompt (with `clean` on).
-- **No line at all:** a prompt that is not English, slash commands, and anything in `claude -p` or the SDK, where nothing would show it. In a Cowork task the fixes come at the end of Claude's reply instead: see [In Cowork](#in-cowork).
+- **No line at all:** a prompt that is not in your `language` (with `auto`, one with no prose, only code), slash commands, and anything in `claude -p` or the SDK, where nothing would show it. In a Cowork task the fixes come at the end of Claude's reply instead: see [In Cowork](#in-cowork).
 
 The native-speaker line is rare on purpose. It shows only when a sentence is clearly unidiomatic even with the grammar fixed, not for style.
 
+## Other languages
+
+The `language` setting picks what is checked:
+
+- **`English`** (the default): as before 1.7, word for word the same system prompt. Prompts in other languages are skipped and cost nothing.
+- **Another language** (`French`, `German`, `Brazilian Portuguese`...): only prompts in that language are checked; the rest are skipped.
+- **`auto`**: every prompt is checked in its own language, so you can switch from prompt to prompt. Prompts with no prose, only code, are skipped. Each prompt is a model call, whatever its language.
+
+Outside English, the reason under each fix is in the prompt's language, and the native-speaker line is in that language too. Words from another language mixed in (English technical terms in a French prompt, say) are left alone. Prompts in Chinese, Japanese or Thai count about one word per two characters for `min_words`, so `好的` is skipped like `ok`.
+
+Each kept fix and day count remembers its language, and the history keeps them apart. `/grammar stats` and `/grammar review` cover one language: the one you name (`/grammar stats 7d french`, `/grammar review french`), else your `language` setting, else the one you've written the most prompts in. Stats name the others kept (`Also kept: French (12 fixes)`). The review writes its advice in the language it reviews. `/grammar ask` sends the fixes of every language, grouped by language, and answers in the language you ask in. A history from before 1.7 counts as English.
+
 ## Your mistakes over time
 
-Each checked prompt adds to `grammar-history.json` in your Claude Code folder (`~/.claude/`, or `$CLAUDE_CONFIG_DIR`): its fixes, each with the words, the fix, the reason, the kind of mistake and the time, plus a count per day of prompts checked and prompts with a fix. The first session that keeps fixes starts with a notice naming the file; it shows once. The model labels each fix with one kind: spelling, tense, agreement, article, preposition, word order, wrong word, missing word, extra word or other. Days are UTC dates, the same on every machine. If two sessions write the file at the same moment, at most one entry is lost. If a write is cut short, the lines that still parse are kept and the next check writes the file whole again; the day counts come first in the file, so what a cut loses is the newest fixes.
+Each checked prompt adds to `grammar-history.json` in your Claude Code folder (`~/.claude/`, or `$CLAUDE_CONFIG_DIR`): its fixes, each with the words, the fix, the reason, the kind of mistake and the time, plus a count per day of prompts checked and prompts with a fix. The first session that keeps fixes starts with a notice naming the file; it shows once. Each fix and day count also notes its language when it is not English. The model labels each fix with one kind: spelling, tense, agreement, article, preposition, word order, wrong word, missing word, extra word or other. Days are UTC dates, the same on every machine. If two sessions write the file at the same moment, at most one entry is lost. If a write is cut short, the lines that still parse are kept and the next check writes the file whole again; the day counts come first in the file, so what a cut loses is the newest fixes.
 
 Not kept: the prompt itself, the native-speaker line (it is a whole sentence), fixes longer than 60 characters, fixes that only change case or spacing, fixes that look like code or a path (`/`, `_`, brackets, `file.ts`), and fixes for words on your ignore list. The file keeps 90 days (today and the 89 before, UTC) and at most 2000 fixes, so it stays under about 300 KB.
 
@@ -197,7 +210,7 @@ When your account can't use Sonnet, it asks the model in your `model` setting in
 
 ### Ask about your English
 
-`/grammar ask` takes any question about your English and answers it from one Sonnet call, using your own fixes as examples when they show the point:
+`/grammar ask` takes any question about your English (or the other languages you write in) and answers it from one Sonnet call, using your own fixes as examples when they show the point:
 
 ```
 /grammar ask why do I keep dropping "the"?
@@ -231,7 +244,7 @@ bun tools/import-history.ts --days 30       # the last 30 days (default 7, at mo
 
 - It reads only prompts you typed, sent at once or queued while Claude worked: no slash commands, no Claude's replies or tool output, no subagents. It uses your settings and both `grammar.json` files, the way the plugin does, so `skip`, `ignore` and `"history": false` all apply.
 - It checks about 20 prompts per call through `claude -p` with your own login (Haiku at low effort unless your settings say otherwise). The calls run in safe mode from an empty folder, so no CLAUDE.md, plugins, hooks, MCP servers or tools come along, and they save no session. A prompt a reply skips gets one more call. 195 prompts took 10 calls, 40 seconds and about $0.02.
-- `--days N` covers the same days as the period `Nd`: today and the N − 1 days before, UTC. It prints how many prompts were checked, how many weren't English, and how many got no usable answer.
+- `--days N` covers the same days as the period `Nd`: today and the N − 1 days before, UTC. It prints how many prompts were checked, how many were in another language (with `auto`, had no prose), and how many got no usable answer. It checks in your `language` setting and keeps each fix under its language.
 - It imports only the days before the history's first day, so running it again adds nothing twice.
 - For another config folder, pass `--config-dir` (it defaults to `$CLAUDE_CONFIG_DIR`, then `~/.claude`). It needs [Bun](https://bun.sh).
 
@@ -296,6 +309,12 @@ The check asks Haiku for JSON:
 
 ```json
 { "english": true, "fixes": [{ "from": "...", "to": "...", "why": "...", "kind": "preposition" }], "natural": null }
+```
+
+With another `language` or `auto`, it names the language instead, or `null` for a text it doesn't check:
+
+```json
+{ "language": "French", "fixes": [{ "from": "...", "to": "...", "why": "...", "kind": "agreement" }], "natural": null }
 ```
 
 Fixes for words that aren't in the prompt, or are on your ignore list, are dropped before they're drawn. The system prompt is at the top of `hooks/check.ts`, so tune it there.

@@ -2,10 +2,10 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { applyFixes, compileIgnore, compileSkip, cut, entriesFrom, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
+import { applyFixes, compileIgnore, compileSkip, cut, entriesFrom, languageOf, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
 import { BATCH, keepFixes, parseBatch, parseReply, system, typedPart } from '../hooks/check'
 import { STREAK_FROM, checkFor, cleanText, plainText, replyNote, usefulNatural } from '../hooks/grammar'
-import { ASK_MEMORY, askInput, historyText, importWindow, keepable, kindOf, merge, pairsOf, parseHistory, parsePeriod, prune, record, reviewInput, splitAsk, statsText, summaryOf, trendOf, within } from '../hooks/history'
+import { ASK_MEMORY, askInput, historyText, importWindow, inLanguage, keepable, kindOf, languagesIn, merge, pairsOf, parseHistory, parsePeriod, pickLanguage, prune, record, reviewInput, splitAsk, splitLanguage, statsText, summaryOf, trendOf, within } from '../hooks/history'
 import type { Period } from '../hooks/history'
 import type { Entry, History, Kind } from '../hooks/history'
 import { batches, typedText } from '../tools/transcript'
@@ -730,6 +730,7 @@ test('config helpers: settings, lists, words and cuts', () => {
     natural: true,
     model: 'haiku',
     effort: 'low',
+    language: 'English',
     dialect: 'any',
     minWords: 2,
     maxChars: 6000,
@@ -1241,7 +1242,7 @@ test('/grammar ask answers with no fixes kept, from Sonnet, and draws its exampl
   const asked = haiku(on, 'Use "the" for a thing you named before.\n  a file → the file')
   const text = await ask($, 'when do I use "the"?')
   expect(asked.models).toEqual(['sonnet'])
-  expect(asked.systems[0]).toContain('answer their questions about English')
+  expect(asked.systems[0]).toContain('Answer in the language the question is asked in.')
   expect(asked.prompts[0]).toContain('Their kept fixes (everything kept): none kept.')
   expect(asked.prompts[0]).toContain('Their question: when do I use "the"?')
   expect(asked.prompts[0]).not.toContain('Earlier in this conversation')
@@ -1343,7 +1344,7 @@ test('/grammar ask takes a period first, sends this session\'s latest fixes, and
   expect(asked.models.at(-1)).toBe('sonnet')
   const prompt = asked.prompts.at(-1) ?? ''
   // The week's 3 kept fixes and the 2 the prompt above just added.
-  expect(prompt).toContain('Their kept fixes (last 7 days): \n5 fixes.')
+  expect(prompt).toContain('Their kept fixes in English (last 7 days): \n5 fixes.')
   expect(prompt).toContain('3× a file → the file (article)')
   expect(prompt).not.toContain('teh')
   expect(prompt).toContain('Fixes in their latest prompts, newest first:\nappea → appear (typo)\nabout → above (wrong word)')
@@ -1475,4 +1476,137 @@ test('endpoint helpers: the URL, the host and the answer', () => {
   expect(chatAnswer(200, '{"choices":[{"message":{"content":"{}"}}]}')).toMatchObject({ isAnswered: true, text: '{}' })
   expect(chatAnswer(200, '{"choices":[{"message":{"content":""},"finish_reason":"length"}]}')).toMatchObject({ isAnswered: false, reason: 'endpoint: empty answer (cut off at max tokens)' })
   expect(chatAnswer(500, 'oops').isAnswered).toBe(false)
+})
+
+// Languages other than English.
+
+test('a language set: the prompt names it, other languages are skipped, and its fixes are kept as that language', { options: { language: 'french' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const asked = haiku(on, (n: number) =>
+    n === 1 ? { language: 'Français', fixes: [{ from: 'le table', to: 'la table', why: 'genre', kind: 'agreement' }] } : { language: null, fixes: [] },
+  )
+  await $.prompt.submit({ text: 'mets le table dans le fichier' } as never)
+  await clock.advance(5)
+  await $.prompt.submit({ text: 'put the table in the file' } as never)
+  await clock.advance(5)
+  expect(asked.systems[0]).toContain('You proofread French that a non-native speaker typed')
+  expect(asked.systems[0]).toContain('If the text is not mainly French, answer {"language": null')
+  // The English spelling rule is for English only.
+  expect(asked.systems[0]).not.toContain('American')
+  expect((await (await mountRow($, 'mets le table dans le fichier')).find({ key: 'gr-fixes' }))?.text).toContain('la table')
+  expect(await (await mountRow($, 'put the table in the file')).find({ key: 'grammar' })).toBeUndefined()
+  // Kept as French, the setting's name, whatever the model called it; the skipped prompt is not counted.
+  const h = parseHistory(asked.files.get(HISTORY_FILE) ?? '')
+  expect(h.fixes.map(f => [f.from, f.lang])).toEqual([['le table', 'French']])
+  expect(h.days).toEqual([{ day: '2026-10-30', checked: 1, withFixes: 1, lang: 'French' }])
+
+  const help = (await $.command.run({ command: 'grammar', args: 'help' } as never)).text ?? ''
+  expect(help).toContain('Language: French.')
+  expect((await $.command.run({ command: 'grammar', args: 'on' } as never)).text).toContain('French check on')
+})
+
+test('auto: each prompt is checked in its own language, any script, and kept under it', { options: { language: 'auto' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const replies: Record<string, unknown> = {
+    'je veux que tu corrige le bug': { language: 'French', fixes: [{ from: 'corrige', to: 'corriges', why: 'subjonctif', kind: 'agreement' }] },
+    'このバグを直してください': { language: 'Japanese', fixes: [] },
+    [TYPO]: FIXES,
+  }
+  const { prompts, systems } = haiku(on, (n: number) => Object.values(replies)[n - 1])
+  for (const text of Object.keys(replies)) {
+    await $.prompt.submit({ text } as never)
+    await clock.advance(5)
+  }
+  expect(prompts).toEqual(Object.keys(replies))
+  expect(systems[0]).toContain('in whatever language it is written in')
+  expect(systems[0]).toContain('In English text: Accept American and British spelling alike.')
+  expect((await (await mountRow($, 'je veux que tu corrige le bug')).find({ key: 'gr-fixes' }))?.text).toContain('corriges')
+  expect((await (await mountRow($, TYPO)).find({ key: 'gr-fixes' }))?.text).toContain('appear')
+
+  const stats = async (args: string) => (await $.command.run({ command: 'grammar', args: `stats ${args}` } as never)).text ?? ''
+  // Each language the same count: the tie goes by fixes, so English (2) first, then French; Japanese had none.
+  const all = await stats('')
+  expect(all).toContain('Everything kept, English (')
+  expect(all).toContain('Also kept: French (1 fixes). /grammar stats french shows it.')
+  const french = await stats('7d french')
+  expect(french).toContain('Last 7 days, French (')
+  expect(french).toContain('corrige → corriges')
+  expect(french).not.toContain('appea')
+  // A clean prompt counts, with no fix to show.
+  expect(await stats('japanese')).toContain('Everything kept, Japanese (Oct 30): 1 prompts checked, 0 with a fix')
+  expect(await stats('klingon')).toContain('Languages kept: English, French, Japanese.')
+})
+
+test('/grammar review covers one language and writes its advice in it', { options: { language: 'auto' } }, async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const french = Array.from({ length: 25 }, (_, i) => ({ ...entry('le table', 'la table', 'agreement', NOW - i * 1000), lang: 'French' }))
+  const english = Array.from({ length: 30 }, (_, i) => entry('a file', 'the file', 'article', NOW - i * 1000))
+  const h: History = {
+    version: 1,
+    fixes: [...french, ...english].sort((a, b) => a.at - b.at),
+    days: [
+      { day: '2026-10-30', checked: 40, withFixes: 25 },
+      { day: '2026-10-30', checked: 30, withFixes: 25, lang: 'French' },
+    ],
+  }
+  const asked = haiku(on, '1. Le genre des noms.\n  le table → la table', undefined, { [HISTORY_FILE]: historyText(h) })
+  const text = (await $.command.run({ command: 'grammar', args: 'review french' } as never)).text ?? ''
+  expect(asked.systems[0]).toContain('non-native French speaker')
+  expect(asked.systems[0]).toContain('Write in French.')
+  expect(asked.prompts[0]).toContain('le table → la table')
+  expect(asked.prompts[0]).not.toContain('a file')
+  expect(text).toContain('Grammar review · French · everything kept')
+  // With none named: the most checked language.
+  await $.command.run({ command: 'grammar', args: 'review' } as never)
+  expect(asked.systems[1]).toContain('non-native English speaker')
+})
+
+test('language helpers: names, replies, word counts, and the history by language', () => {
+  expect(languageOf(' brazilian  PORTUGUESE ')).toBe('Brazilian Portuguese')
+  expect(languageOf('AUTO')).toBe('auto')
+  expect(languageOf('')).toBeUndefined()
+  expect(settingsFrom({ language: 'german' }).language).toBe('German')
+
+  expect(parseReply('{"language": "french", "fixes": []}')?.language).toBe('French')
+  expect(parseReply('{"language": null, "fixes": []}')).toBeNull()
+  expect(parseReply('{"english": true, "fixes": []}')?.language).toBe('English')
+  expect(parseReply('{"fixes": []}', 'German')?.language).toBe('German')
+  expect(() => parseReply('{"fixes": []}')).toThrow('no language')
+  expect(system({ natural: false, language: 'auto' })).toContain('"language": "<its main language, named in English>"')
+  expect(system({ natural: true, language: 'German' })).toContain('native speaker of the text\'s language')
+
+  // A run of Chinese or Japanese is about a word per two characters: 好的 is one, like "ok".
+  expect(wordCount('好的')).toBe(1)
+  expect(wordCount('修复这个错误')).toBe(3)
+  expect(wordCount('修复 bug 在这里')).toBe(4)
+  expect(wordCount('исправь эту ошибку')).toBe(3)
+
+  // A file from before 1.7 is all English; English entries are written without a lang, as before.
+  const old = parseHistory(`{"version": 1, "days": [{"day": "2026-10-30", "checked": 2, "withFixes": 1}], "fixes": [{"from": "teh", "to": "the", "kind": "spelling", "at": ${NOW}}]}`)
+  const both = record(record(old, [{ from: 'le table', to: 'la table', why: '', kind: 'agreement' }], NOW, 'French'), [], NOW, 'English')
+  expect(historyText(both)).not.toContain('"lang":"English"')
+  expect(both.days).toEqual([
+    { day: '2026-10-30', checked: 3, withFixes: 1 },
+    { day: '2026-10-30', checked: 1, withFixes: 1, lang: 'French' },
+  ])
+  expect(languagesIn(both)).toEqual([
+    { lang: 'English', checked: 3, fixes: 1 },
+    { lang: 'French', checked: 1, fixes: 1 },
+  ])
+  expect(inLanguage(both, 'French').fixes.map(f => f.from)).toEqual(['le table'])
+  // Merged, a day's counts add up within each language.
+  expect(merge(both, both, NOW).days.map(d => [d.lang ?? 'English', d.checked])).toEqual([['English', 6], ['French', 2]])
+
+  expect(splitLanguage('7d French', ['English', 'French'])).toEqual({ lang: 'French', rest: '7d' })
+  expect(splitLanguage('french since 2026-10-01', ['French'])).toEqual({ lang: 'French', rest: 'since 2026-10-01' })
+  expect(splitLanguage('7d brazilian portuguese', ['Portuguese', 'Brazilian Portuguese'])).toEqual({ lang: 'Brazilian Portuguese', rest: '7d' })
+  expect(splitLanguage('7d', ['French'])).toEqual({ rest: '7d' })
+  expect(pickLanguage(both, undefined, 'French')).toMatchObject({ lang: 'French', show: true })
+  expect(pickLanguage(both, undefined, 'auto')).toMatchObject({ lang: 'English', show: true })
+  expect(pickLanguage(old, undefined, 'English')).toMatchObject({ lang: 'English', show: false, others: [] })
+
+  const p = askInput([...inLanguage(both, 'French').fixes, entry('a file', 'the file', 'article')], 'everything kept', [{ from: 'teh', to: 'the', why: '', language: 'English' }], [], 'why?')
+  expect(p).toContain('Their kept fixes in French (everything kept)')
+  expect(p).toContain('Their kept fixes in English (everything kept)')
+  expect(p).toContain('teh → the (English)')
 })

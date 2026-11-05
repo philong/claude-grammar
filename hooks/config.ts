@@ -13,6 +13,8 @@ export type Settings = {
   natural: boolean
   model: string
   effort: Effort
+  // The language prompts are checked in (a name in English, 'English' by default), or 'auto': each prompt in whatever language it is written in.
+  language: string
   dialect: Dialect
   minWords: number
   maxChars: number
@@ -29,6 +31,24 @@ export type Settings = {
   endpointKey: string
 }
 
+export const AUTO = 'auto'
+export const ENGLISH = 'English'
+
+/** A language's name as kept and compared: trimmed, each word capitalized ("brazilian portuguese" is "Brazilian Portuguese"). 'auto' for auto, undefined for none. */
+export const languageOf = (x: unknown): string | undefined => {
+  const w = typeof x === 'string' ? x.trim().replace(/\s+/g, ' ') : ''
+  if (w === '' || w.length > 40) {
+    return undefined
+  }
+  if (w.toLowerCase() === AUTO) {
+    return AUTO
+  }
+  return w
+    .split(' ')
+    .map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+    .join(' ')
+}
+
 const pick = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   allowed.includes(value as T) ? (value as T) : fallback
 
@@ -41,6 +61,7 @@ export const settingsFrom = (o: PluginOptions): Settings => ({
   natural: o.natural !== false,
   model: typeof o.model === 'string' && o.model.trim() !== '' ? o.model : 'haiku',
   effort: pick(o.effort, ['low', 'medium', 'high'] as const, 'low'),
+  language: languageOf(o.language) ?? ENGLISH,
   dialect: pick(o.dialect, ['any', 'us', 'uk'] as const, 'any'),
   minWords: clamp(o.min_words, 1, 50, 2),
   maxChars: clamp(o.max_chars, 200, 20000, 6000),
@@ -141,8 +162,17 @@ export const compileSkip = (entries: readonly string[]): RegExp[] =>
     }
   })
 
+// Runs of scripts written without spaces between words (Chinese, Japanese, Thai...): a word is about two characters.
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]+/gu
+
 /** The words of a prompt, for the minimum-words rule. */
-export const wordCount = (text: string) => (text.match(/\p{L}+(['’]\p{L}+)*/gu) ?? []).length
+export const wordCount = (text: string) => {
+  const unspaced = (text.match(UNSPACED) ?? []).reduce((n, run) => n + Math.ceil([...run].length / 2), 0)
+  return unspaced + (text.replace(UNSPACED, ' ').match(/\p{L}+(['’]\p{L}+)*/gu) ?? []).length
+}
+
+/** Two letters in any script: something to check. */
+export const LETTERS = /\p{L}{2}/u
 
 /** The first `max` characters, cut at the last space when one is near, so no word is cut in half. */
 export const cut = (text: string, max: number) => {

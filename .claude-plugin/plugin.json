@@ -1,7 +1,7 @@
 {
   "name": "grammar",
   "version": "1.7.0",
-  "description": "Checks the English of each prompt you send to Claude Code, shows the fixes under it, and keeps them so /grammar stats and /grammar review show the mistakes you make most, and /grammar ask answers your questions about them. Sends each prompt you type to Haiku (one small call per prompt), and the kept fixes to Sonnet when you run /grammar review or /grammar ask, through your own Claude Code session, or all of it to an OpenAI-compatible endpoint you set (llama.cpp, LM Studio, Ollama, OpenRouter)",
+  "description": "Checks the English (or another language you set, or whatever language each prompt is in) of each prompt you send to Claude Code, shows the fixes under it, and keeps them so /grammar stats and /grammar review show the mistakes you make most, and /grammar ask answers your questions about them. Sends each prompt you type to Haiku (one small call per prompt), and the kept fixes to Sonnet when you run /grammar review or /grammar ask, through your own Claude Code session, or all of it to an OpenAI-compatible endpoint you set (llama.cpp, LM Studio, Ollama, OpenRouter)",
   "author": {
     "name": "Jack Klimov",
     "url": "https://jack.direct"
@@ -12,7 +12,7 @@
     "enabled": {
       "type": "boolean",
       "title": "Check my prompts",
-      "description": "Send each prompt you type to the model for an English check. /grammar on|off sets this too.",
+      "description": "Send each prompt you type to the model for a grammar check. /grammar on|off sets this too.",
       "default": true
     },
     "natural": {
@@ -42,10 +42,16 @@
         "high"
       ]
     },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language your prompts are checked in, named in English (English, French, German, Japanese...). Prompts in other languages are skipped. auto checks each prompt in whatever language it is written in.",
+      "default": "English"
+    },
     "dialect": {
       "type": "string",
       "title": "Spelling",
-      "description": "any accepts US and UK spelling alike; us or uk flags the other one's spellings.",
+      "description": "For English: any accepts US and UK spelling alike; us or uk flags the other one's spellings.",
       "default": "any",
       "options": [
         "any",

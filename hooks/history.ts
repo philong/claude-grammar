@@ -1,6 +1,6 @@
 // The mistake history: fixes kept across sessions for /grammar stats and /grammar review. Plain functions, no engine calls.
 import type { GrammarFix } from '../types'
-import { isIgnored } from './config'
+import { ENGLISH, isIgnored, languageOf } from './config'
 import type { Ignore } from './config'
 
 /** What kind of mistake a fix corrects; the model picks one, anything else is "other". */
@@ -23,10 +23,13 @@ export const kindOf = (x: unknown): Kind => {
   return (KINDS as readonly string[]).includes(k) ? (k as Kind) : 'other'
 }
 
-/** One kept fix; `at` is when, in milliseconds since the epoch. */
-export type Entry = { from: string; to: string; why: string; kind: Kind; at: number }
-/** One day's checks: how many prompts were checked and how many of them had a fix. */
-export type Day = { day: string; checked: number; withFixes: number }
+/**
+ * One kept fix; `at` is when, in milliseconds since the epoch. `lang` is the language it was written in, left out for
+ * English: every fix kept before 1.7 is English.
+ */
+export type Entry = { from: string; to: string; why: string; kind: Kind; at: number; lang?: string }
+/** One day's checks in one language (left out for English): how many prompts were checked and how many of them had a fix. */
+export type Day = { day: string; checked: number; withFixes: number; lang?: string }
 export type History = { version: 1; fixes: Entry[]; days: Day[] }
 
 export const EMPTY_HISTORY: History = { version: 1, fixes: [], days: [] }
@@ -51,16 +54,25 @@ export const importWindow = (now: number, days: number, firstDay?: string) => {
   return to > from ? { from, to } : undefined
 }
 
+/** An entry's language: English when it names none. */
+export const langOf = (x: { lang?: string }) => x.lang ?? ENGLISH
+
+/** The `lang` field to keep: none for English, so files stay as before 1.7 for those who write English only. */
+const langField = (lang: unknown) => {
+  const l = languageOf(lang)
+  return l === undefined || l === ENGLISH ? {} : { lang: l }
+}
+
 const isRecord = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object' && !Array.isArray(x)
 
 const entryOf = (e: unknown): Entry[] =>
   isRecord(e) && typeof e.from === 'string' && typeof e.to === 'string' && Number.isFinite(e.at)
-    ? [{ from: e.from, to: e.to, why: typeof e.why === 'string' ? e.why : '', kind: kindOf(e.kind), at: e.at as number }]
+    ? [{ from: e.from, to: e.to, why: typeof e.why === 'string' ? e.why : '', kind: kindOf(e.kind), at: e.at as number, ...langField(e.lang) }]
     : []
 
 const dayEntryOf = (d: unknown): Day[] =>
   isRecord(d) && typeof d.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.day) && Number.isFinite(d.checked) && Number.isFinite(d.withFixes)
-    ? [{ day: d.day, checked: d.checked as number, withFixes: d.withFixes as number }]
+    ? [{ day: d.day, checked: d.checked as number, withFixes: d.withFixes as number, ...langField(d.lang) }]
     : []
 
 /** The entries of a file that does not parse whole (two sessions writing at once, say): each line on its own. */
@@ -117,7 +129,7 @@ export const historyText = (h: History) => {
   return `{\n"version": 1,\n"days": ${rows(h.days)},\n"fixes": ${rows(h.fixes)}\n}\n`
 }
 
-// Paths, identifiers, calls, markup, file names and dotfiles: code, not English.
+// Paths, identifiers, calls, markup, file names and dotfiles: code, not prose.
 const CODEISH = /[/\\_(){}[\]<>=`@#$|~]|\w\.\w|(^|\s)\.\w/
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ')
@@ -144,33 +156,92 @@ export const prune = (h: History, now: number): History => {
   return {
     version: 1,
     fixes: h.fixes.filter(f => f.at >= since).slice(-MAX_ENTRIES),
-    days: h.days.filter(d => d.day >= sinceDay).sort((a, b) => a.day.localeCompare(b.day)),
+    days: h.days.filter(d => d.day >= sinceDay).sort((a, b) => a.day.localeCompare(b.day) || langOf(a).localeCompare(langOf(b))),
   }
 }
 
-/** The history after one checked prompt: the day's counts moved, its keepable fixes added, the old dropped. */
-export const record = (h: History, fixes: readonly GrammarFix[], now: number): History => {
+/** The history after one checked prompt in `lang`: that day's counts for it moved, its keepable fixes added, the old dropped. */
+export const record = (h: History, fixes: readonly GrammarFix[], now: number, lang: string = ENGLISH): History => {
   const day = dayOf(now)
-  const today = h.days.find(d => d.day === day)
+  const field = langField(lang)
+  const mine = (d: Day) => d.day === day && langOf(d) === langOf(field)
+  const today = h.days.find(mine)
   const days = [
-    ...h.days.filter(d => d.day !== day),
-    { day, checked: (today?.checked ?? 0) + 1, withFixes: (today?.withFixes ?? 0) + (fixes.length > 0 ? 1 : 0) },
+    ...h.days.filter(d => !mine(d)),
+    { day, checked: (today?.checked ?? 0) + 1, withFixes: (today?.withFixes ?? 0) + (fixes.length > 0 ? 1 : 0), ...field },
   ]
   const kept = fixes
     .filter(keepable)
-    .map(f => ({ from: f.from.trim(), to: f.to.trim(), why: f.why.trim(), kind: kindOf(f.kind), at: now }))
+    .map(f => ({ from: f.from.trim(), to: f.to.trim(), why: f.why.trim(), kind: kindOf(f.kind), at: now, ...field }))
   return prune({ version: 1, fixes: [...h.fixes, ...kept], days }, now)
 }
 
-/** Two histories as one: fixes in time order, a day's counts summed, then pruned as of `now`. */
+/** Two histories as one: fixes in time order, a day's counts in each language summed, then pruned as of `now`. */
 export const merge = (a: History, b: History, now: number): History => {
   const days = new Map<string, Day>()
   for (const d of [...a.days, ...b.days]) {
-    const seen = days.get(d.day)
-    days.set(d.day, { day: d.day, checked: (seen?.checked ?? 0) + d.checked, withFixes: (seen?.withFixes ?? 0) + d.withFixes })
+    const key = `${d.day}\u0000${langOf(d)}`
+    const seen = days.get(key)
+    days.set(key, { day: d.day, checked: (seen?.checked ?? 0) + d.checked, withFixes: (seen?.withFixes ?? 0) + d.withFixes, ...langField(d.lang) })
   }
   const fixes = [...a.fixes, ...b.fixes].sort((x, y) => x.at - y.at)
   return prune({ version: 1, fixes, days: [...days.values()] }, now)
+}
+
+/** The languages a history holds, the most checked prompts first (then the most fixes), with their counts. */
+export const languagesIn = (h: History) => {
+  const by = new Map<string, { lang: string; checked: number; fixes: number }>()
+  const at = (lang: string) => by.get(lang) ?? { lang, checked: 0, fixes: 0 }
+  for (const d of h.days) {
+    const l = at(langOf(d))
+    by.set(l.lang, { ...l, checked: l.checked + d.checked })
+  }
+  for (const f of h.fixes) {
+    const l = at(langOf(f))
+    by.set(l.lang, { ...l, fixes: l.fixes + 1 })
+  }
+  return [...by.values()].sort((a, b) => b.checked - a.checked || b.fixes - a.fixes || a.lang.localeCompare(b.lang))
+}
+
+/** The part of a history in one language. */
+export const inLanguage = (h: History, lang: string): History => ({
+  version: 1,
+  fixes: h.fixes.filter(f => langOf(f) === lang),
+  days: h.days.filter(d => langOf(d) === lang),
+})
+
+/**
+ * A language named at the start or end of a command's words (`stats 7d french`, `review french since 2026-10-01`),
+ * when the history holds it; the words without it.
+ */
+export const splitLanguage = (words: string, known: readonly string[]): { lang?: string; rest: string } => {
+  const w = words.trim().replace(/\s+/g, ' ')
+  const lower = w.toLowerCase()
+  // Longest names first, so "Brazilian Portuguese" wins over a "Portuguese" also kept.
+  for (const lang of [...known].sort((a, b) => b.length - a.length)) {
+    const l = lang.toLowerCase()
+    if (lower === l) {
+      return { lang, rest: '' }
+    }
+    if (lower.startsWith(`${l} `)) {
+      return { lang, rest: w.slice(l.length + 1) }
+    }
+    if (lower.endsWith(` ${l}`)) {
+      return { lang, rest: w.slice(0, w.length - l.length - 1) }
+    }
+  }
+  return { rest: w }
+}
+
+/**
+ * Which language stats and a review cover: the one named, else the one set when the history holds it, else the one
+ * with the most checked prompts. With the others kept, for a pointer to them.
+ */
+export const pickLanguage = (h: History, named: string | undefined, setting: string) => {
+  const all = languagesIn(h)
+  const lang = named ?? (all.some(l => l.lang === setting) ? setting : all[0]?.lang ?? ENGLISH)
+  // Named only when it tells something: more than one kept, or not English.
+  return { lang, others: all.filter(l => l.lang !== lang), show: all.length > 1 || lang !== ENGLISH }
 }
 
 /** The kept fixes, less any the ignore list names now (it may have grown since they were kept). */
@@ -304,6 +375,8 @@ export const compare = (h: History, period: Period, now: number): Trend | undefi
 
 /** The figures at the top of a review, and of stats. */
 export type Summary = {
+  // The language it covers, when worth naming (more than one kept, or not English).
+  language?: string
   label: string
   range: string
   checked: number
@@ -314,7 +387,7 @@ export type Summary = {
   top?: Pair
 }
 
-export const summaryOf = (h: History, ignore: Ignore, period: Period, now: number): Summary => {
+export const summaryOf = (h: History, ignore: Ignore, period: Period, now: number, language?: string): Summary => {
   const part = within(h, period)
   const fixes = visible(part, ignore)
   const { checked, withFixes } = counts(part.days)
@@ -326,6 +399,7 @@ export const summaryOf = (h: History, ignore: Ignore, period: Period, now: numbe
     .map(k => ({ ...k, share: k.n / fixes.length }))
   const top = pairsOf(fixes)[0]
   return {
+    ...(language === undefined ? {} : { language }),
     label: period.label,
     range: from === period.toDay ? shortDay(from) : `${shortDay(from)} – ${shortDay(period.toDay)}`,
     checked,
@@ -340,7 +414,7 @@ export const summaryOf = (h: History, ignore: Ignore, period: Period, now: numbe
 /** The summary as plain lines: what a review's row holds where the panel isn't drawn. The model never sees it. */
 export const summaryText = (m: Summary) =>
   [
-    `Grammar review · ${m.label} (${m.range})`,
+    `Grammar review · ${m.language === undefined ? '' : `${m.language} · `}${m.label} (${m.range})`,
     `${m.checked} prompts · ${pct(m.withFixes, m.checked)} with a fix · ${m.fixes} fixes`,
     ...(m.trend === undefined ? [] : [m.trend.text]),
     m.kinds
@@ -350,8 +424,30 @@ export const summaryText = (m: Summary) =>
     ...(m.top === undefined ? [] : [`most repeated: ${arrow(m.top)} ×${m.top.count}`]),
   ].join('\n')
 
-/** What /grammar stats prints, for a period (everything kept when none is given). */
-export const statsText = (h: History, ignore: Ignore, now: number, path: string, on: boolean, period?: Period, words = '', reviewer = 'Sonnet') => {
+/** The languages kept besides the one shown, a line pointing at them; none when there are none. */
+export type Others = { lang: string; fixes: number }[]
+
+const othersLine = (others: Others, command: string) =>
+  others.length === 0
+    ? []
+    : [`Also kept: ${others.map(o => `${o.lang} (${o.fixes} fixes)`).join(', ')}. /grammar ${command} ${others[0]?.lang.toLowerCase()} shows ${others.length === 1 ? 'it' : 'one'}.`]
+
+/**
+ * What /grammar stats prints, for a period (everything kept when none is given), of a history in one language:
+ * `language` names it in the heading when set, and `others` points at the languages it leaves out.
+ */
+export const statsText = (
+  h: History,
+  ignore: Ignore,
+  now: number,
+  path: string,
+  on: boolean,
+  period?: Period,
+  words = '',
+  reviewer = 'Sonnet',
+  language?: string,
+  others: Others = [],
+) => {
   const p = period ?? (parsePeriod('', now) as Period)
   const where = `Kept in ${path}.${on ? '' : ' The history is off: /grammar history on keeps new fixes.'}`
   if (h.fixes.length === 0 && h.days.length === 0) {
@@ -359,11 +455,11 @@ export const statsText = (h: History, ignore: Ignore, now: number, path: string,
   }
   const m = summaryOf(h, ignore, p, now)
   if (m.checked === 0 && m.fixes === 0) {
-    return `Nothing kept for ${p.label}. ${where}`
+    return [`Nothing kept for ${p.label}${language === undefined ? '' : ` in ${language}`}. ${where}`, ...othersLine(others, 'stats')].join('\n')
   }
   const fixes = visible(within(h, p), ignore)
   const label = p.label.charAt(0).toUpperCase() + p.label.slice(1)
-  const lines = [`${label} (${m.range}): ${m.checked} prompts checked, ${m.withFixes} with a fix (${pct(m.withFixes, m.checked)}), ${m.fixes} fixes kept.`]
+  const lines = [`${label}${language === undefined ? '' : `, ${language}`} (${m.range}): ${m.checked} prompts checked, ${m.withFixes} with a fix (${pct(m.withFixes, m.checked)}), ${m.fixes} fixes kept.`]
   if (m.trend !== undefined) {
     lines.push(p.before === undefined ? m.trend.text : `${m.trend.text}.`)
   }
@@ -388,6 +484,7 @@ export const statsText = (h: History, ignore: Ignore, now: number, path: string,
     m.fixes >= REVIEW_FROM
       ? `/grammar review${forPeriod}: advice on these from ${reviewer} (one call).`
       : `/grammar review gives advice from ${REVIEW_FROM} fixes; ${m.fixes} so far.`,
+    ...othersLine(others, 'stats'),
     where,
   )
   return lines.join('\n')
@@ -409,7 +506,9 @@ export const reviewInput = (fixes: readonly Entry[]) => {
   ].join('\n')
 }
 
-export const REVIEW_SYSTEM = `You coach a non-native English speaker who writes prompts to a coding assistant. You get the fixes a proofreader made to their prompts over time, grouped, with how often each came up.
+/** The review's system prompt, for fixes in one language; the advice is written in that language. */
+export const reviewSystem = (language: string) => `You coach a non-native ${language} speaker who writes prompts to a coding assistant in ${language}. You get the fixes a proofreader made to their prompts over time, grouped, with how often each came up.
+Write in ${language}.
 Find the 3 to 5 habits behind the most mistakes, most frequent first. For each: a numbered line naming the habit and the rule that fixes it, in plain words, then one to three of their own fixes as examples, each on its own line as "  wrong → right".
 Skip one-off typos unless they share a pattern. If a fix looks like the proofreader's own mistake rather than the writer's, leave it out.
 Plain text only: no markdown, no headings, no bold, no intro and no closing line.`
@@ -440,11 +539,27 @@ export const splitAsk = (words: string, now: number): { period: Period; question
   return { period, question: head === null ? w : w.slice(head[0].length).trim() }
 }
 
-/** The ask's prompt: the period's grouped fixes, this session's latest fixes, the remembered exchanges, then the question. */
-export const askInput = (fixes: readonly Entry[], label: string, recent: readonly GrammarFix[], turns: readonly Turn[], question: string) => {
-  const parts = [`Their kept fixes (${label}): ${fixes.length === 0 ? 'none kept.' : `\n${reviewInput(fixes)}`}`]
+/**
+ * The ask's prompt: the period's grouped fixes in each language, this session's latest fixes, the remembered
+ * exchanges, then the question.
+ */
+export const askInput = (
+  fixes: readonly Entry[],
+  label: string,
+  recent: readonly (GrammarFix & { language?: string })[],
+  turns: readonly Turn[],
+  question: string,
+) => {
+  const langs = [...new Set(fixes.map(langOf))]
+  const parts =
+    fixes.length === 0
+      ? [`Their kept fixes (${label}): none kept.`]
+      : langs.map(lang => `Their kept fixes in ${lang} (${label}): \n${reviewInput(fixes.filter(f => langOf(f) === lang))}`)
   if (recent.length > 0) {
-    parts.push(['Fixes in their latest prompts, newest first:', ...recent.map(f => `${arrow(f)}${f.why === '' ? '' : ` (${f.why})`}`)].join('\n'))
+    // The language of each, once there is more than one to tell apart.
+    const many = new Set([...langs, ...recent.map(f => f.language ?? ENGLISH)]).size > 1
+    const tail = (f: GrammarFix & { language?: string }) => [f.why, many ? f.language ?? ENGLISH : ''].filter(x => x !== '').join('; ')
+    parts.push(['Fixes in their latest prompts, newest first:', ...recent.map(f => `${arrow(f)}${tail(f) === '' ? '' : ` (${tail(f)})`}`)].join('\n'))
   }
   if (turns.length > 0) {
     parts.push(['Earlier in this conversation, oldest first:', ...turns.map(t => `Q: ${t.q}\nA: ${t.a}`)].join('\n\n'))
@@ -453,7 +568,8 @@ export const askInput = (fixes: readonly Entry[], label: string, recent: readonl
   return parts.join('\n\n')
 }
 
-export const ASK_SYSTEM = `You coach a non-native English speaker who writes prompts to a coding assistant, and answer their questions about English. You get the fixes a proofreader made to their prompts over time (grouped, with counts), the fixes in their latest prompts, and what was asked and answered earlier in this conversation.
+export const ASK_SYSTEM = `You coach someone who writes prompts to a coding assistant in a language that may not be their first, and answer their questions about it. You get the fixes a proofreader made to their prompts over time (grouped by language, with counts), the fixes in their latest prompts, and what was asked and answered earlier in this conversation.
+Answer in the language the question is asked in.
 Answer the question directly, in a few short paragraphs at most. When their own fixes show the point, give one to three of them as examples, each on its own line as "  wrong → right". Use only fixes you were given and never invent mistakes they made. When there are too few fixes to see a pattern, say so and answer in general terms.
-If the question is not about English or their writing, say in one line that you only answer questions about English.
+If the question is not about language or their writing, say in one line that you only answer questions about language and their writing.
 Plain text only: no markdown, no headings, no bold, no intro and no closing line.`

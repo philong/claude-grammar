@@ -14,9 +14,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
-import type { GrammarFix } from '../types'
+import type { GrammarFix, GrammarReply } from '../types'
 import { BATCH, keepFixes, parseBatch, system, typedPart } from '../hooks/check'
-import { EMPTY, compileIgnore, compileSkip, cut, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
+import { AUTO, EMPTY, ENGLISH, LETTERS, compileIgnore, compileSkip, cut, mergeLists, parseLists, settingsFrom, wordCount } from '../hooks/config'
 import type { Lists, Settings } from '../hooks/config'
 import { EMPTY_HISTORY, KEEP_DAYS, dayOf, historyText, importWindow, merge, parseHistory, record } from '../hooks/history'
 import type { History } from '../hooks/history'
@@ -96,7 +96,7 @@ const findPrompts = async (from: number, to: number, s: Settings): Promise<{ pro
       const text = typedPart(p.text.trim())
       // Slash commands, and lines Claude Code wraps in tags (command output, ! shell input); pasted text is checked as the plugin checks it.
       const tagged = text.startsWith('<') && !text.startsWith('<pasted_content')
-      if (text.startsWith('/') || tagged || !/[A-Za-z]{2}/.test(text) || wordCount(text) < s.minWords) {
+      if (text.startsWith('/') || tagged || !(s.language === ENGLISH ? /[A-Za-z]{2}/ : LETTERS).test(text) || wordCount(text) < s.minWords) {
         continue
       }
       const lists = mergeLists(readLists(join(configDir, 'grammar.json')), readLists(join(p.cwd, '.claude', 'grammar.json')))
@@ -189,8 +189,8 @@ const main = async () => {
   }
 
   const global = readLists(join(configDir, 'grammar.json'))
-  const sys = `${system({ natural: false, dialect: s.dialect, showWhy: s.showWhy, kind: true, ignore: compileIgnore(global.ignore).words })}\n${BATCH}`
-  const results = new Map<number, GrammarFix[] | null>()
+  const sys = `${system({ natural: false, language: s.language, dialect: s.dialect, showWhy: s.showWhy, kind: true, ignore: compileIgnore(global.ignore).words })}\n${BATCH}`
+  const results = new Map<number, { fixes: GrammarFix[]; language: string } | null>()
   let cost = 0
   let done = 0
   /** The replies for these prompts by id; a failed call twice in a row gives none. */
@@ -200,7 +200,7 @@ const main = async () => {
       try {
         const r = await complete(sys, input, s)
         cost += r.cost
-        const replies = parseBatch(r.text)
+        const replies = parseBatch(r.text, s.language === AUTO ? undefined : s.language)
         // A reply that answers none of the texts is a failed call: asked again.
         if (replies.size === 0) {
           throw new Error(`no usable answer: ${r.text.slice(0, 120)}`)
@@ -226,12 +226,14 @@ const main = async () => {
         }
       }
       for (const p of batch) {
-        const reply = replies.get(p.id) as { fixes: GrammarFix[] } | null | undefined
+        const reply = replies.get(p.id) as GrammarReply | null | undefined
         if (reply === undefined) {
           continue
         }
         const lists = mergeLists(global, readLists(join(p.cwd, '.claude', 'grammar.json')))
-        results.set(p.id, reply === null ? null : keepFixes(reply.fixes, p.text, compileIgnore(lists.ignore)))
+        // A language set is the one kept, however the model spells it.
+        const language = s.language === AUTO ? reply?.language ?? ENGLISH : s.language
+        results.set(p.id, reply === null ? null : { fixes: keepFixes(reply.fixes, p.text, compileIgnore(lists.ignore)), language })
       }
       done += 1
       process.stdout.write(`\r  ${done}/${calls.length} calls`)
@@ -240,12 +242,12 @@ const main = async () => {
   await Promise.all(Array.from({ length: PARALLEL }, worker))
   process.stdout.write('\n')
 
-  // English that was checked counts, clean or not, as the plugin counts it; other languages do not.
+  // A prompt that was checked counts, clean or not, as the plugin counts it; one in a language not checked does not.
   let imported = EMPTY_HISTORY
   for (const p of prompts) {
-    const fixes = results.get(p.id)
-    if (fixes !== undefined && fixes !== null) {
-      imported = record(imported, fixes, p.at)
+    const r = results.get(p.id)
+    if (r !== undefined && r !== null) {
+      imported = record(imported, r.fixes, p.at, r.language)
     }
   }
   // Read again just before writing: a live session may have added to it meanwhile, or be writing it this moment.
@@ -265,11 +267,12 @@ const main = async () => {
 
   const checked = imported.days.reduce((n, d) => n + d.checked, 0)
   const withFixes = imported.days.reduce((n, d) => n + d.withFixes, 0)
-  const notEnglish = [...results.values()].filter(r => r === null).length
+  const notChecked = [...results.values()].filter(r => r === null).length
+  const which = s.language === AUTO ? '' : ` in ${s.language}`
   const failed = prompts.length - results.size
   console.log(
-    `${checked} prompts in English checked, ${withFixes} with a fix, ${imported.fixes.length} fixes kept; ` +
-      `${notEnglish} not in English${failed > 0 ? `, ${failed} left out (no usable answer)` : ''}. Cost about $${cost.toFixed(3)}.\n` +
+    `${checked} prompts${which} checked, ${withFixes} with a fix, ${imported.fixes.length} fixes kept; ` +
+      `${notChecked} ${s.language === AUTO ? 'with no prose to check' : `not in ${s.language}`}${failed > 0 ? `, ${failed} left out (no usable answer)` : ''}. Cost about $${cost.toFixed(3)}.\n` +
       `Written to ${historyPath}. /grammar stats shows them.`,
   )
 }

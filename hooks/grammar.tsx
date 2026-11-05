@@ -1,11 +1,15 @@
-// Grammar: after each prompt you send, a model checks its English and a dim line under that prompt in the
-// transcript shows the fixes and, when the phrasing is clearly off, how a native speaker would say it.
+// Grammar: after each prompt you send, a model checks its grammar (in English, another language set, or whatever language
+// it is in) and a dim line under that prompt in the transcript shows the fixes and, when the phrasing is clearly off, how a
+// native speaker would say it.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelApiError, Register, RenderNode } from 'claude-code'
 
 import type { GrammarAsk, GrammarCheck, GrammarFix, GrammarReview, GrammarTurn } from '../types'
 import {
+  AUTO,
   EMPTY,
+  ENGLISH,
+  LETTERS,
   applyFixes,
   compileIgnore,
   compileSkip,
@@ -29,14 +33,18 @@ import {
   MAX_ENTRIES,
   MAX_QUESTION,
   REVIEW_FROM,
-  REVIEW_SYSTEM,
   askInput,
   historyText,
+  inLanguage,
+  languagesIn,
   parseHistory,
   parsePeriod,
+  pickLanguage,
   record,
   reviewInput,
+  reviewSystem,
   splitAsk,
+  splitLanguage,
   statsText,
   summaryOf,
   summaryText,
@@ -154,7 +162,7 @@ const readHistory = async ($: EngineInterface, path: string): Promise<History> =
  * so two sessions at once lose at most the entry of a check that lands in the same moment; a file torn by such a
  * moment keeps the lines that still parse (parseHistory) and is whole again after this write.
  */
-const keep = async ($: EngineInterface, fixes: readonly GrammarFix[]) => {
+const keep = async ($: EngineInterface, fixes: readonly GrammarFix[], lang: string) => {
   const path = await historyFile($)
   if (path === undefined) {
     return
@@ -166,7 +174,7 @@ const keep = async ($: EngineInterface, fixes: readonly GrammarFix[]) => {
     toastOnce($, `grammar: ${path} does not parse (${message(err)}), so no fixes are kept while it doesn't. /grammar history clear starts it over.`)
     return
   }
-  await $.fs.write(path, historyText(record(h, fixes, await $.clock.now())))
+  await $.fs.write(path, historyText(record(h, fixes, await $.clock.now(), lang)))
 }
 
 // This session's history writes (each check's, and a clear), one after another, so none undoes another.
@@ -178,8 +186,8 @@ const inTurn = <T,>(write: () => Promise<T>): Promise<T> => {
   return next
 }
 
-const keepInTurn = ($: EngineInterface, fixes: readonly GrammarFix[]) =>
-  inTurn(() => keep($, fixes)).catch(err => toastOnce($, `grammar: no fixes kept: ${message(err)}`))
+const keepInTurn = ($: EngineInterface, fixes: readonly GrammarFix[], lang: string) =>
+  inTurn(() => keep($, fixes, lang)).catch(err => toastOnce($, `grammar: no fixes kept: ${message(err)}`))
 
 /**
  * Once, at the start of a session that will keep fixes but has no history file yet: says where they will go. Not in a
@@ -245,13 +253,16 @@ const migrate = async ($: EngineInterface) => {
 /** The model that answers: the endpoint's when one is set, else `fallback` (the `model` setting for checks, Sonnet for reviews and asks). */
 export const modelName = (s: Settings, fallback: string) => (s.endpoint === '' ? fallback : s.endpointModel || 'the default model')
 
+/** What the check is called: "English", "French", or "grammar" in auto. */
+export const languageName = (s: Settings) => (s.language === AUTO ? 'grammar' : s.language)
+
 /** Who checks the prompts, for the help and the on message. */
 export const checkerOf = (s: Settings) => (s.endpoint === '' ? s.model : `${modelName(s, s.model)} at ${hostOf(s.endpoint)}`)
 
 const ask = async ($: EngineInterface, s: Settings, text: string, natural: boolean, kind: boolean, ignore: Ignore, timeoutMs?: number) => {
   const request = {
     model: s.model,
-    system: system({ natural, dialect: s.dialect, showWhy: s.showWhy, kind, ignore: ignore.words }),
+    system: system({ natural, language: s.language, dialect: s.dialect, showWhy: s.showWhy, kind, ignore: ignore.words }),
     prompt: cut(text, s.maxChars),
     maxTokens: 4096,
     effort: s.effort,
@@ -285,10 +296,12 @@ const run = async ($: EngineInterface, s: Settings, id: number, text: string) =>
     result = { id, text, status: 'error', fixes: [], error: r.reason }
   } else {
     try {
-      const reply = parseReply(r.text)
+      const reply = parseReply(r.text, s.language === AUTO ? undefined : s.language)
       const fixes = reply === null ? [] : keepFixes(reply.fixes, text, ignore)
+      // A language set is the one kept, however the model spells it.
+      const language = s.language === AUTO ? reply?.language : s.language
       result =
-        reply === null ? null : { id, text, status: 'done', fixes, natural: usefulNatural(reply.natural, text, fixes, ignore) }
+        reply === null ? null : { id, text, status: 'done', fixes, natural: usefulNatural(reply.natural, text, fixes, ignore), language }
     } catch (err) {
       result = { id, text, status: 'error', fixes: [], error: message(err) }
     }
@@ -306,11 +319,11 @@ const run = async ($: EngineInterface, s: Settings, id: number, text: string) =>
     result = clean ? { ...result, streak: n } : result
   }
   const final = result
-  // Not English: the pending check goes, so the row shows nothing.
+  // Not a language checked: the pending check goes, so the row shows nothing.
   await update($, checks, all => all.flatMap(c => (c.id !== id ? [c] : final === null ? [] : [final])))
-  // English that was checked counts toward the history, clean or not; the line is drawn first.
+  // A prompt that was checked counts toward the history, clean or not; the line is drawn first.
   if (history && final?.status === 'done') {
-    await keepInTurn($, final.fixes)
+    await keepInTurn($, final.fixes, final.language ?? ENGLISH)
   }
   await showElsewhere($, s, final)
 }
@@ -350,10 +363,12 @@ const showElsewhere = async ($: EngineInterface, s: Settings, final: GrammarChec
 
 /** The part of a prompt to check, or undefined when it is not checked: off, paused, too short, a command, not typed. */
 const checkable = async ($: EngineInterface, s: Settings, e: { text: string }) => {
-  // Slash commands and hidden prompts are not typed English. Loose, as older type builds lack both fields.
+  // Slash commands and hidden prompts are not typed prose. Loose, as older type builds lack both fields.
   const { command, isMeta } = e as { command?: unknown; isMeta?: boolean }
   const text = typedPart(e.text)
-  if (command !== undefined || isMeta === true || !/[A-Za-z]{2}/.test(text) || wordCount(text) < s.minWords) {
+  // English needs Latin letters; another language or auto, letters of any script.
+  const letters = s.language === ENGLISH ? /[A-Za-z]{2}/ : LETTERS
+  if (command !== undefined || isMeta === true || !letters.test(text) || wordCount(text) < s.minWords) {
     return undefined
   }
   if (!(await read($, isOn)) || (await read($, fails)) >= MAX_FAILS) {
@@ -374,7 +389,7 @@ const inCowork = async ($: EngineInterface) =>
 
 /** What Claude is told beside a Cowork prompt with mistakes: end the reply with these lines. */
 export const replyNote = (lines: string) =>
-  `The grammar plugin checked the English of the user's message above. Cowork cannot show plugin output, so end your reply with the lines below, on their own after everything else, exactly as written, and say nothing about them:
+  `The grammar plugin checked the grammar of the user's message above. Cowork cannot show plugin output, so end your reply with the lines below, on their own after everything else, exactly as written, and say nothing about them:
 
 ${lines}
 
@@ -383,7 +398,7 @@ Otherwise answer the message as you would without this note.`
 /**
  * Cowork draws no plugin UI at all (no band, toast, transcript line or slash command), so there the prompt waits for
  * its check and Claude is asked to end its reply with the fixes. The note for Claude, or undefined: not Cowork, the
- * cowork setting off, nothing to fix, not English, or a failed check (the prompt is sent as it is).
+ * cowork setting off, nothing to fix, not in the language checked, or a failed check (the prompt is sent as it is).
  */
 const checkForReply = async ($: EngineInterface, s: Settings, e: { text: string }) => {
   if (!s.cowork || !(await inCowork($))) {
@@ -434,18 +449,18 @@ const queue = async ($: EngineInterface, s: Settings, e: { text: string }) => {
 }
 
 const usage = (s: Settings) => `/grammar help: this list, and what is on now
-/grammar [on|off]: the English check of your prompts
+/grammar [on|off]: the ${languageName(s)} check of your prompts
 /grammar natural [on|off]: the native-speaker line
 /grammar ignore add <words>: never flag these (phrases: separate with commas)
 /grammar ignore rm <words>: flag them again
 /grammar ignore: the ignore and skip lists, and their files
-/grammar stats [7d|30d|since 2026-10-01]: your most frequent mistakes, from the kept fixes
-/grammar review [7d|30d|since 2026-10-01]: a summary, then advice on them from ${modelName(s, 'Sonnet')} (one call, from ${REVIEW_FROM} fixes)
-/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your English, with your fixes at hand (one call)
+/grammar stats [7d|30d|since 2026-10-01] [language]: your most frequent mistakes, from the kept fixes
+/grammar review [7d|30d|since 2026-10-01] [language]: a summary, then advice on them from ${modelName(s, 'Sonnet')} (one call, from ${REVIEW_FROM} fixes)
+/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your writing, with your fixes at hand (one call)
 /grammar ask list|clear: what follow-ups remember (the last ${ASK_MEMORY} asks and reviews), or forget it
 /grammar ask memory [on|off]: remembering asks for follow-ups
 /grammar history [on|off|clear]: keeping fixes for stats and review
-More settings (model, spelling, minimum words, icons) are under /config.`
+More settings (language, model, spelling, minimum words, icons) are under /config.`
 
 /** Adds or removes entries in the global grammar.json, keeping whatever else the file holds. */
 const editIgnore = async ($: EngineInterface, op: 'add' | 'rm', entries: string[]) => {
@@ -542,6 +557,18 @@ const remember = async ($: EngineInterface, q: string, a: string) => {
   await update($, thread, all => [...all, { q: cut(q, MAX_QUESTION), a: cut(a, MAX_ANSWER) }].slice(-ASK_MEMORY))
 }
 
+/** The language stats and a review cover (named in the words, else the one set or the most checked), and the words left. */
+const forLanguage = (h: History, words: string, s: Settings) => {
+  const { lang, rest } = splitLanguage(words, languagesIn(h).map(l => l.lang))
+  return { ...pickLanguage(h, lang, s.language), rest }
+}
+
+/** A message about words that don't read, with the languages kept when there is more than one to name. */
+const withLanguages = (text: string, h: History) => {
+  const all = languagesIn(h)
+  return all.length > 1 ? `${text} Languages kept: ${all.map(l => l.lang).join(', ')}.` : text
+}
+
 /** One model call over the period's grouped fixes: Sonnet, else the check's own model when Sonnet is not allowed. */
 const review = async ($: EngineInterface, s: Settings, words: string) => {
   const loaded = await loadHistory($)
@@ -549,17 +576,20 @@ const review = async ($: EngineInterface, s: Settings, words: string) => {
     return loaded
   }
   const now = await $.clock.now()
-  const period = parsePeriod(words, now)
+  const picked = forLanguage(loaded.h, words, s)
+  const period = parsePeriod(picked.rest, now)
   if (typeof period === 'string') {
-    return period
+    return withLanguages(period, loaded.h)
   }
-  const fixes = visible(within(loaded.h, period), loaded.ignore)
+  const h = inLanguage(loaded.h, picked.lang)
+  const fixes = visible(within(h, period), loaded.ignore)
   if (fixes.length < REVIEW_FROM) {
     const longer = period.before === undefined ? '' : ' Try a longer period.'
-    return `Not enough to go on yet: ${fixes.length} fixes kept for ${period.label}, the review starts at ${REVIEW_FROM}.${longer} /grammar stats shows them so far.`
+    const where = picked.show ? ` in ${picked.lang}` : ''
+    return `Not enough to go on yet: ${fixes.length} fixes kept${where} for ${period.label}, the review starts at ${REVIEW_FROM}.${longer} /grammar stats shows them so far.`
   }
-  const summary = summaryOf(loaded.h, loaded.ignore, period, now)
-  const request = { system: REVIEW_SYSTEM, prompt: reviewInput(fixes), maxTokens: 8000, effort: 'medium' as const, timeoutMs: 180000 }
+  const summary = summaryOf(h, loaded.ignore, period, now, picked.show ? picked.lang : undefined)
+  const request = { system: reviewSystem(picked.lang), prompt: reviewInput(fixes), maxTokens: 8000, effort: 'medium' as const, timeoutMs: 180000 }
   const r = await complete($, s, request)
   if ('refused' in r) {
     return `No review: ${r.refused}`
@@ -575,6 +605,8 @@ const shown = async ($: EngineInterface, summary: Summary, advice: string, model
   await update($, reviews, all => [{ text, summary, advice, model, followUp }, ...all].slice(0, 10))
   return text
 }
+
+const capital = (w: string) => w.charAt(0).toUpperCase() + w.slice(1)
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
@@ -602,7 +634,7 @@ const askCommand = async ($: EngineInterface, s: Settings, words: string) => {
   const w = words.trim()
   const lower = w.toLowerCase()
   if (lower === '' || lower === 'help') {
-    const how = `/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your English, with your kept fixes at hand.\n/grammar ask list|clear, /grammar ask memory on|off.`
+    const how = `/grammar ask [7d|30d|since 2026-10-01] <question>: ask ${modelName(s, 'Sonnet')} about your writing, with your kept fixes at hand.\n/grammar ask list|clear, /grammar ask memory on|off.`
     return `${how}\n\n${await askList($)}`
   }
   if (lower === 'list') {
@@ -641,7 +673,9 @@ const askCommand = async ($: EngineInterface, s: Settings, words: string) => {
   // An unreadable history leaves the question without the kept fixes; the answer says when there are none.
   const loaded = await loadHistory($).catch(() => 'unreadable')
   const fixes = typeof loaded === 'string' ? [] : visible(within(loaded.h, split.period), loaded.ignore)
-  const recent = (await read($, checks)).flatMap(c => (c.status === 'done' ? c.fixes : [])).slice(0, ASK_RECENT)
+  const recent = (await read($, checks))
+    .flatMap(c => (c.status === 'done' ? c.fixes.map(f => ({ ...f, language: c.language })) : []))
+    .slice(0, ASK_RECENT)
   const on = await read($, askMemory)
   const turns = on ? await read($, thread) : []
   const request = {
@@ -726,7 +760,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'grammar',
       description:
-        'The English check of your prompts: /grammar on|off, /grammar stats, /grammar review, /grammar ask <question>, /grammar ignore add|rm <words>, /grammar help',
+        `The ${languageName(s)} check of your prompts: /grammar on|off, /grammar stats, /grammar review, /grammar ask <question>, /grammar ignore add|rm <words>, /grammar help`,
       argumentHint: '[help|on|off|natural|ignore|stats|review|ask|history]',
     })
 
@@ -744,6 +778,7 @@ export const register: Register = (on, options) => {
         const check = !enabled ? 'off' : paused ? `paused after ${MAX_FAILS} failures (/grammar on resumes)` : 'on'
         const now = [
           `Check: ${check}. Natural line: ${(await read($, isNatural)) ? 'on' : 'off'}.`,
+          `Language: ${s.language === AUTO ? 'auto (each prompt in its own language)' : s.language}.`,
           `Model: ${checkerOf(s)}${s.endpoint === '' ? `, effort ${s.effort}` : ''}, spelling ${s.dialect}, at least ${s.minWords} words, up to ${s.maxChars} characters.`,
           await historyLine($),
           (await read($, askMemory))
@@ -773,11 +808,19 @@ export const register: Register = (on, options) => {
         }
         const words = rest.join(' ')
         const now = await $.clock.now()
-        const period = parsePeriod(words, now)
+        const picked = forLanguage(loaded.h, words, s)
+        const period = parsePeriod(picked.rest, now)
         if (typeof period === 'string') {
-          return { text: period }
+          return { text: withLanguages(period, loaded.h) }
         }
-        return { text: statsText(loaded.h, loaded.ignore, now, loaded.path, await read($, keepsHistory), period, words, modelName(s, 'Sonnet')) }
+        // The other languages' fixes in the same period, for the pointer to them.
+        const others = picked.others
+          .map(o => ({ lang: o.lang, fixes: visible(within(inLanguage(loaded.h, o.lang), period), loaded.ignore).length }))
+          .filter(o => o.fixes > 0)
+        const h = loaded.h.fixes.length + loaded.h.days.length === 0 ? loaded.h : inLanguage(loaded.h, picked.lang)
+        const keeping = await read($, keepsHistory)
+        const language = picked.show ? picked.lang : undefined
+        return { text: statsText(h, loaded.ignore, now, loaded.path, keeping, period, words, modelName(s, 'Sonnet'), language, others) }
       }
       case 'review':
         return { text: await review($, s, rest.join(' ')) }
@@ -810,7 +853,10 @@ export const register: Register = (on, options) => {
         }
         const why = await persist($, 'enabled', want)
         return {
-          text: (want ? `English check on: ${checkerOf(s)} checks each prompt you send.` : 'English check off.') + sessionOnly(why),
+          text:
+            (want
+              ? `${capital(languageName(s))} check on: ${checkerOf(s)} checks each prompt you send${s.language === AUTO ? ', in its own language' : ''}.`
+              : `${capital(languageName(s))} check off.`) + sessionOnly(why),
         }
       }
       default:
@@ -818,8 +864,8 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Only prompts with Latin letters can be English.
-  on('prompt.submit', { text: /[A-Za-z]{2}/ }, async ($, e, next) => {
+  // Only prompts with letters (Latin ones for English; checkable tells) can be checked.
+  on('prompt.submit', { text: LETTERS }, async ($, e, next) => {
     // A failed check must never stop the prompt.
     const note = await checkForReply($, s, e).catch(() => undefined)
     if (note !== undefined) {
@@ -906,7 +952,7 @@ export const register: Register = (on, options) => {
       <Box key="gr-panel" flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1} alignSelf="flex-start">
         <Text key="gr-p-title">
           <Text bold>Grammar review</Text>
-          <Text dimColor>{` · ${m.label} (${m.range})`}</Text>
+          <Text dimColor>{` · ${m.language === undefined ? '' : `${m.language} · `}${m.label} (${m.range})`}</Text>
         </Text>
         <Text key="gr-p-counts">{`${m.checked} prompts · ${Math.round((100 * m.withFixes) / Math.max(1, m.checked))}% with a fix · ${m.fixes} fixes`}</Text>
         {m.trend !== undefined && (
